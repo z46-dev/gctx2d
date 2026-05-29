@@ -3,6 +3,7 @@ package gctx2d
 import (
 	"fmt"
 	"math"
+	"strings"
 	"unsafe"
 
 	"github.com/gogpu/gputypes"
@@ -183,8 +184,9 @@ func (f *fontFace) Release() {
 }
 
 // SetFont selects the active font face used by FillText and StrokeText.
-// Passing a nil handle selects the context's default font. Font faces are cached per font handle and size.
-func (r *Context) SetFont(size float64, handle *FontHandle) (err error) {
+// Passing a nil handle selects the context's default font.
+// An optional weight selects a cached synthetic weight variant. If omitted, FontWeightRegular is used.
+func (r *Context) SetFont(size float64, handle *FontHandle, weights ...FontWeight) (err error) {
 	if r == nil {
 		err = fmt.Errorf("nil gctx2d context")
 		return
@@ -204,6 +206,8 @@ func (r *Context) SetFont(size float64, handle *FontHandle) (err error) {
 		return
 	}
 
+	weight := fontWeightFromArgs(weights)
+
 	if r.textureLayout == nil || r.fontSampler == nil {
 		err = fmt.Errorf("font resources are not initialized")
 		return
@@ -213,14 +217,14 @@ func (r *Context) SetFont(size float64, handle *FontHandle) (err error) {
 		r.fontFaces = make(map[fontFaceKey]*fontFace)
 	}
 
-	var key fontFaceKey = fontFaceKey{handle: handle, size: size}
+	var key fontFaceKey = fontFaceKey{handle: handle, size: size, weight: weight}
 	if face := r.fontFaces[key]; face != nil {
 		r.currentFont = face
 		return
 	}
 
 	var atlas *fontAtlas
-	if atlas, err = buildFontAtlas(handle, size); err != nil {
+	if atlas, err = buildFontAtlas(handle, size, weight); err != nil {
 		return
 	}
 
@@ -431,6 +435,26 @@ func (r *Context) SetLineWidth(width float32) {
 	}
 
 	r.lineWidth = width
+}
+
+// SetTextAlign sets the horizontal anchor used by FillText and StrokeText.
+func (r *Context) SetTextAlign(align TextAlign) {
+	switch align {
+	case TextAlignLeft, TextAlignCenter, TextAlignRight:
+		r.textAlign = align
+	default:
+		r.textAlign = TextAlignLeft
+	}
+}
+
+// SetTextBaseline sets the vertical anchor used by FillText and StrokeText.
+func (r *Context) SetTextBaseline(baseline TextBaseline) {
+	switch baseline {
+	case TextBaselineAlphabetic, TextBaselineTop, TextBaselineMiddle, TextBaselineBottom:
+		r.textBaseline = baseline
+	default:
+		r.textBaseline = TextBaselineAlphabetic
+	}
 }
 
 // SetImageEffect sets the image shader effect used by subsequent DrawImage calls.
@@ -787,15 +811,16 @@ func (r *Context) appendImageClipBounds(img *gimage.Image, transform Matrix, x, 
 }
 
 // FillText draws an ASCII-oriented text run with the current fill style.
-// x/y use the same baseline coordinate convention as gg.DrawString.
+// x/y are interpreted using the current text align and baseline settings.
 // If no font has been selected with SetFont, this is a no-op.
-func (r *Context) FillText(s string, x, baselineY float32) {
-	r.appendTextRun(s, x, baselineY, r.fillStyle)
+func (r *Context) FillText(s string, x, y float32) {
+	r.appendTextRun(s, x, y, r.fillStyle)
 }
 
 // StrokeText draws an ASCII-oriented text stroke with the current stroke style and line width.
-// It uses the active font face selected by SetFont. If no font has been selected, this is a no-op.
-func (r *Context) StrokeText(s string, x, baselineY float32) {
+// x/y are interpreted using the current text align and baseline settings.
+// If no font has been selected with SetFont, this is a no-op.
+func (r *Context) StrokeText(s string, x, y float32) {
 	if r == nil || len(s) == 0 || r.currentFont == nil || r.lineWidth <= 0 {
 		return
 	}
@@ -817,29 +842,41 @@ func (r *Context) StrokeText(s string, x, baselineY float32) {
 				continue
 			}
 
-			r.appendTextRun(s, x+dx, baselineY+dy, r.strokeStyle)
+			r.appendTextRun(s, x+dx, y+dy, r.strokeStyle)
 		}
 	}
 }
 
-func (r *Context) appendTextRun(s string, x, baselineY float32, color Color) {
+func (r *Context) appendTextRun(s string, x, y float32, color Color) {
 	if r == nil || len(s) == 0 || r.currentFont == nil || r.currentFont.atlas == nil || r.currentFont.group == nil {
 		return
 	}
 
 	var (
-		face               *fontFace  = r.currentFont
-		atlas              *fontAtlas = face.atlas
-		startX, penX, penY float32    = x, x, baselineY
+		face  *fontFace  = r.currentFont
+		atlas *fontAtlas = face.atlas
+		lines []string   = strings.Split(s, "\n")
 	)
 
-	for _, ch := range s {
-		if ch == '\n' {
-			penX = startX
-			penY += atlas.LineHeight
-			continue
-		}
+	if len(lines) == 0 {
+		return
+	}
 
+	var baselineY float32 = r.resolveTextBaselineY(y, len(lines), atlas)
+
+	for lineIndex, line := range lines {
+		var (
+			lineWidth float32 = r.measureTextLine(line, atlas)
+			penX      float32 = r.resolveTextAlignX(x, lineWidth)
+			penY      float32 = baselineY + float32(lineIndex)*atlas.LineHeight
+		)
+
+		r.appendTextLine(face, atlas, line, penX, penY, color)
+	}
+}
+
+func (r *Context) appendTextLine(face *fontFace, atlas *fontAtlas, s string, penX, penY float32, color Color) {
+	for _, ch := range s {
 		var (
 			g  glyph
 			ok bool
@@ -865,6 +902,63 @@ func (r *Context) appendTextRun(s string, x, baselineY float32, color Color) {
 		}
 
 		penX += g.Advance
+	}
+}
+
+func (r *Context) measureTextLine(s string, atlas *fontAtlas) (width float32) {
+	if atlas == nil || len(s) == 0 {
+		return
+	}
+
+	for _, ch := range s {
+		var (
+			g  glyph
+			ok bool
+		)
+
+		if g, ok = atlas.Glyphs[ch]; !ok {
+			if g, ok = atlas.Glyphs['?']; !ok {
+				continue
+			}
+		}
+
+		width += g.Advance
+	}
+
+	return
+}
+
+func (r *Context) resolveTextAlignX(x, lineWidth float32) float32 {
+	switch r.textAlign {
+	case TextAlignCenter:
+		return x - lineWidth*0.5
+	case TextAlignRight:
+		return x - lineWidth
+	default:
+		return x
+	}
+}
+
+func (r *Context) resolveTextBaselineY(y float32, lineCount int, atlas *fontAtlas) float32 {
+	if atlas == nil {
+		return y
+	}
+
+	if lineCount < 1 {
+		lineCount = 1
+	}
+
+	var lineSpan float32 = atlas.LineHeight * float32(lineCount-1)
+
+	switch r.textBaseline {
+	case TextBaselineTop:
+		return y + atlas.Ascent
+	case TextBaselineMiddle:
+		return y - lineSpan*0.5 + (atlas.Ascent-atlas.Descent)*0.5
+	case TextBaselineBottom:
+		return y - lineSpan - atlas.Descent
+	default:
+		return y
 	}
 }
 

@@ -20,6 +20,32 @@ const (
 	atlasPad    = 2
 )
 
+const (
+	FontWeightThin       FontWeight = 100
+	FontWeightExtraLight FontWeight = 200
+	FontWeightLight      FontWeight = 300
+	FontWeightRegular    FontWeight = 400
+	FontWeightNormal                = FontWeightRegular
+	FontWeightMedium     FontWeight = 500
+	FontWeightSemiBold   FontWeight = 600
+	FontWeightBold       FontWeight = 700
+	FontWeightExtraBold  FontWeight = 800
+	FontWeightBlack      FontWeight = 900
+)
+
+const (
+	TextAlignLeft TextAlign = iota
+	TextAlignCenter
+	TextAlignRight
+)
+
+const (
+	TextBaselineAlphabetic TextBaseline = iota
+	TextBaselineTop
+	TextBaselineMiddle
+	TextBaselineBottom
+)
+
 var (
 	loadedFontsLock sync.Mutex
 	loadedFonts     map[string]*FontHandle = make(map[string]*FontHandle)
@@ -121,8 +147,8 @@ func FindSystemFont() (fontPath string) {
 	return
 }
 
-// buildFontAtlas creates a font atlas for the specified loaded font and size.
-func buildFontAtlas(handle *FontHandle, size float64) (atlas *fontAtlas, err error) {
+// buildFontAtlas creates a font atlas for the specified loaded font, size, and weight.
+func buildFontAtlas(handle *FontHandle, size float64, weight FontWeight) (atlas *fontAtlas, err error) {
 	if handle == nil || handle.parsed == nil {
 		err = fmt.Errorf("nil font handle")
 		return
@@ -132,6 +158,8 @@ func buildFontAtlas(handle *FontHandle, size float64) (atlas *fontAtlas, err err
 		err = fmt.Errorf("font size must be positive")
 		return
 	}
+
+	weight = normalizeFontWeight(weight)
 
 	var face font.Face
 	if face, err = opentype.NewFace(handle.parsed, &opentype.FaceOptions{
@@ -150,8 +178,18 @@ func buildFontAtlas(handle *FontHandle, size float64) (atlas *fontAtlas, err err
 
 	var (
 		metrics    font.Metrics = face.Metrics()
+		ascent     int          = metrics.Ascent.Ceil()
+		descent    int          = metrics.Descent.Ceil()
 		lineHeight int          = metrics.Height.Ceil()
 	)
+
+	if ascent <= 0 {
+		ascent = int(size * 0.8)
+	}
+
+	if descent <= 0 {
+		descent = max(1, int(size*0.2))
+	}
 
 	if lineHeight <= 0 {
 		lineHeight = int(size * 1.35)
@@ -163,6 +201,8 @@ func buildFontAtlas(handle *FontHandle, size float64) (atlas *fontAtlas, err err
 		Pixels:     dst.Pix,
 		Glyphs:     make(map[rune]glyph, 128),
 		LineHeight: float32(lineHeight),
+		Ascent:     float32(ascent),
+		Descent:    float32(descent),
 	}
 
 	var (
@@ -172,13 +212,15 @@ func buildFontAtlas(handle *FontHandle, size float64) (atlas *fontAtlas, err err
 			Src:  image.White,
 			Face: face,
 		}
+		xOffsets []int = syntheticFontWeightOffsets(weight)
+		extraW   int   = max(0, len(xOffsets)-1)
 	)
 
 	for r := rune(32); r <= rune(126); r++ {
 		var (
 			s               string = string(r)
 			bounds, advance        = font.BoundString(face, s)
-			glyphW, glyphH  int    = max(1, (bounds.Max.X - bounds.Min.X).Ceil()), max(1, (bounds.Max.Y - bounds.Min.Y).Ceil())
+			glyphW, glyphH  int    = max(1, (bounds.Max.X-bounds.Min.X).Ceil()+extraW), max(1, (bounds.Max.Y - bounds.Min.Y).Ceil())
 			cellW, cellH    int    = glyphW + atlasPad*2, glyphH + atlasPad*2
 		)
 
@@ -189,19 +231,21 @@ func buildFontAtlas(handle *FontHandle, size float64) (atlas *fontAtlas, err err
 		}
 
 		if y+cellH >= atlasHeight {
-			err = fmt.Errorf("font atlas overflow at rune %q for %q at %.2fpx", r, handle.path, size)
+			err = fmt.Errorf("font atlas overflow at rune %q for %q at %.2fpx weight %d", r, handle.path, size, weight)
 			return
 		}
 
 		var gx, gy int = x + atlasPad, y + atlasPad
 
 		if r != ' ' {
-			drawer.Dot = fixed.Point26_6{
-				X: fixed.I(gx) - bounds.Min.X,
-				Y: fixed.I(gy) - bounds.Min.Y,
-			}
+			for _, xOffset := range xOffsets {
+				drawer.Dot = fixed.Point26_6{
+					X: fixed.I(gx+xOffset) - bounds.Min.X,
+					Y: fixed.I(gy) - bounds.Min.Y,
+				}
 
-			drawer.DrawString(s)
+				drawer.DrawString(s)
+			}
 		}
 
 		atlas.Glyphs[r] = glyph{
@@ -213,7 +257,7 @@ func buildFontAtlas(handle *FontHandle, size float64) (atlas *fontAtlas, err err
 			V0:       float32(gy) / float32(atlasHeight),
 			U1:       float32(gx+glyphW) / float32(atlasWidth),
 			V1:       float32(gy+glyphH) / float32(atlasHeight),
-			Advance:  float32(advance.Ceil()),
+			Advance:  float32(advance.Ceil() + extraW),
 			BearingX: float32(bounds.Min.X.Floor()),
 			BearingY: float32(bounds.Min.Y.Floor()),
 		}
@@ -225,6 +269,47 @@ func buildFontAtlas(handle *FontHandle, size float64) (atlas *fontAtlas, err err
 	}
 
 	return
+}
+
+func normalizeFontWeight(weight FontWeight) FontWeight {
+	if weight == 0 {
+		return FontWeightRegular
+	}
+
+	if weight < FontWeightThin {
+		return FontWeightThin
+	}
+
+	if weight > FontWeightBlack {
+		return FontWeightBlack
+	}
+
+	return FontWeight(((int(weight) + 50) / 100) * 100)
+}
+
+func fontWeightFromArgs(weights []FontWeight) FontWeight {
+	if len(weights) == 0 {
+		return FontWeightRegular
+	}
+
+	return normalizeFontWeight(weights[0])
+}
+
+// syntheticFontWeightOffsets implements simple synthetic emboldening for cached atlas faces.
+// Lighter-than-regular weights render with the base face because this renderer only has one font file per handle.
+func syntheticFontWeightOffsets(weight FontWeight) []int {
+	weight = normalizeFontWeight(weight)
+
+	switch {
+	case weight <= FontWeightRegular:
+		return []int{0}
+	case weight <= FontWeightSemiBold:
+		return []int{0, 1}
+	case weight <= FontWeightExtraBold:
+		return []int{0, 1, 2}
+	default:
+		return []int{0, 1, 2, 3}
+	}
 }
 
 func cleanFontPath(filePath string) (cleaned string, err error) {

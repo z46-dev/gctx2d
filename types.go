@@ -7,7 +7,10 @@ import (
 )
 
 type (
-	ImageEffect int
+	ImageEffect  int
+	FontWeight   int
+	TextAlign    int
+	TextBaseline int
 
 	Color struct {
 		R float32
@@ -64,11 +67,14 @@ type (
 		Pixels     []byte
 		Glyphs     map[rune]glyph
 		LineHeight float32
+		Ascent     float32
+		Descent    float32
 	}
 
 	fontFaceKey struct {
 		handle *FontHandle
 		size   float64
+		weight FontWeight
 	}
 
 	fontFace struct {
@@ -154,6 +160,8 @@ type (
 		fillStyle          Color
 		strokeStyle        Color
 		lineWidth          float32
+		textAlign          TextAlign
+		textBaseline       TextBaseline
 		rootTransform      Matrix
 		transform          Matrix
 		imageEffect        ImageEffect
