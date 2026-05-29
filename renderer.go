@@ -33,14 +33,14 @@ var vertexStride = uint64(unsafe.Sizeof(vertex{}))
 // NewContext creates a new UI renderer with the specified default font.
 // The fontPath should point to a .ttf/.otf file on the user's system, and fontSize is the default pixel size for rendering text.
 // If fontPath is empty, it will attempt to find a common system font automatically.
-func NewContext(device *wgpu.Device, targetFormat gputypes.TextureFormat, fontPath string, fontSize float64) (renderer *Context, err error) {
+func NewContext(device *wgpu.Device, targetFormat gputypes.TextureFormat) (renderer *Context, err error) {
 	if device == nil {
 		err = fmt.Errorf("nil wgpu device")
 		return
 	}
 
 	var defaultFont *FontHandle
-	if defaultFont, err = LoadFont(fontPath); err != nil {
+	if defaultFont, err = LoadFontByName(DefaultFontName()); err != nil {
 		return
 	}
 
@@ -73,7 +73,7 @@ func NewContext(device *wgpu.Device, targetFormat gputypes.TextureFormat, fontPa
 		return
 	}
 
-	if err = renderer.SetFont(fontSize, nil); err != nil {
+	if err = renderer.SetFont(16, nil); err != nil {
 		renderer.Release()
 		renderer = nil
 		return

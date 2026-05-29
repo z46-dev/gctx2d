@@ -5,13 +5,17 @@ import (
 	"image"
 	"image/draw"
 	"os"
+	"path"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 
 	"golang.org/x/image/font"
 	"golang.org/x/image/font/opentype"
 	"golang.org/x/image/math/fixed"
+
+	"github.com/flopp/go-findfont"
 )
 
 const (
@@ -67,16 +71,51 @@ func (h *FontHandle) Path() string {
 	return h.path
 }
 
+func DefaultFontName() (name string) {
+	var (
+		fonts              []string = findfont.List()
+		bestChoicesInOrder          = []string{
+			"Arial",
+			"DejaVu Sans",
+			"FreeSans",
+			"Helvetica",
+			"Liberation Sans",
+			"Noto Sans",
+		}
+	)
+
+	// Transform bestChoicesInOrder to also have lowercase and no space variants (_, -, and nothing) for more robust matching.
+	var extendedBestChoices []string
+	for _, baseName := range bestChoicesInOrder {
+		extendedBestChoices = append(extendedBestChoices,
+			baseName,
+			strings.ToLower(baseName),
+			strings.ReplaceAll(baseName, " ", ""),
+			strings.ReplaceAll(baseName, " ", "_"),
+			strings.ReplaceAll(baseName, " ", "-"),
+		)
+	}
+
+	for _, fontPath := range fonts {
+		var fontName string = filepath.Base(fontPath)
+		fontName = strings.TrimSuffix(fontName, filepath.Ext(fontName))
+
+		if slices.Contains(extendedBestChoices, fontName) {
+			name = fontName
+			return
+		}
+	}
+
+	return
+}
+
 // LoadFont loads and parses a TrueType/OpenType font file and returns a reusable handle.
 // Loaded handles are cached by normalized file path, so repeated calls for the same file
 // are cheap and return the same handle. Passing an empty path loads FindSystemFont().
 func LoadFont(filePath string) (handle *FontHandle, err error) {
 	if strings.TrimSpace(filePath) == "" {
-		filePath = FindSystemFont()
-		if filePath == "" {
-			err = fmt.Errorf("no system font found")
-			return
-		}
+		err = fmt.Errorf("font file path cannot be empty")
+		return
 	}
 
 	if filePath, err = cleanFontPath(filePath); err != nil {
@@ -115,35 +154,25 @@ func LoadFont(filePath string) (handle *FontHandle, err error) {
 	return
 }
 
-// findSystemFont attempts to locate a common system font on the user's machine.
-func FindSystemFont() (fontPath string) {
-	var (
-		err        error
-		candidates []string = []string{
-			// Windows
-			"C:\\Windows\\Fonts\\arial.ttf",
-			"C:\\Windows\\Fonts\\calibri.ttf",
-			"C:\\Windows\\Fonts\\segoeui.ttf",
-			// macOS
-			"/Library/Fonts/Arial.ttf",
-			"/System/Library/Fonts/Supplemental/Arial.ttf",
-			"/System/Library/Fonts/Supplemental/Courier New.ttf",
-			"/System/Library/Fonts/Supplemental/Times New Roman.ttf",
-			"/System/Library/Fonts/Monaco.ttf",
-			// Linux
-			"/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-			"/usr/share/fonts/TTF/DejaVuSans.ttf",
-			"/usr/share/fonts/liberation/LiberationSans-Regular.ttf",
-		}
-	)
-
-	for _, fontPath = range candidates {
-		if _, err = os.Stat(fontPath); err == nil {
-			return
-		}
+func LoadFontByName(name string) (handle *FontHandle, err error) {
+	if strings.TrimSpace(name) == "" {
+		err = fmt.Errorf("font name cannot be empty")
+		return
 	}
 
-	fontPath = ""
+	var ext string = path.Ext(name)
+	if ext != "" && !strings.EqualFold(ext, ".ttf") {
+		err = fmt.Errorf("unsupported font file extension %q", ext)
+		return
+	}
+
+	var filepath string
+	if filepath, err = findfont.Find(fmt.Sprintf("%s.ttf", name)); err != nil {
+		err = fmt.Errorf("find font %q: %w", name, err)
+		return
+	}
+
+	handle, err = LoadFont(filepath)
 	return
 }
 
