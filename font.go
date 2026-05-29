@@ -5,6 +5,9 @@ import (
 	"image"
 	"image/draw"
 	"os"
+	"path/filepath"
+	"strings"
+	"sync"
 
 	"golang.org/x/image/font"
 	"golang.org/x/image/font/opentype"
@@ -16,6 +19,75 @@ const (
 	atlasHeight = 1024
 	atlasPad    = 2
 )
+
+var (
+	loadedFontsLock sync.Mutex
+	loadedFonts     map[string]*FontHandle = make(map[string]*FontHandle)
+)
+
+// FontHandle is an opaque handle returned by LoadFont and consumed by Context.SetFont.
+// A nil *FontHandle passed to SetFont selects the context's default font.
+type FontHandle struct {
+	path   string
+	parsed *opentype.Font
+}
+
+// Path returns the normalized file path that was loaded for this font handle.
+func (h *FontHandle) Path() string {
+	if h == nil {
+		return ""
+	}
+
+	return h.path
+}
+
+// LoadFont loads and parses a TrueType/OpenType font file and returns a reusable handle.
+// Loaded handles are cached by normalized file path, so repeated calls for the same file
+// are cheap and return the same handle. Passing an empty path loads FindSystemFont().
+func LoadFont(filePath string) (handle *FontHandle, err error) {
+	if strings.TrimSpace(filePath) == "" {
+		filePath = FindSystemFont()
+		if filePath == "" {
+			err = fmt.Errorf("no system font found")
+			return
+		}
+	}
+
+	if filePath, err = cleanFontPath(filePath); err != nil {
+		return
+	}
+
+	loadedFontsLock.Lock()
+	defer loadedFontsLock.Unlock()
+
+	if loadedFonts == nil {
+		loadedFonts = make(map[string]*FontHandle)
+	}
+
+	if handle = loadedFonts[filePath]; handle != nil {
+		return
+	}
+
+	var fontBytes []byte
+	if fontBytes, err = os.ReadFile(filePath); err != nil {
+		err = fmt.Errorf("read font %q: %w", filePath, err)
+		return
+	}
+
+	var parsed *opentype.Font
+	if parsed, err = opentype.Parse(fontBytes); err != nil {
+		err = fmt.Errorf("parse font %q: %w", filePath, err)
+		return
+	}
+
+	handle = &FontHandle{
+		path:   filePath,
+		parsed: parsed,
+	}
+
+	loadedFonts[filePath] = handle
+	return
+}
 
 // findSystemFont attempts to locate a common system font on the user's machine.
 func FindSystemFont() (fontPath string) {
@@ -49,27 +121,25 @@ func FindSystemFont() (fontPath string) {
 	return
 }
 
-// buildFontAtlas creates a font atlas for the specified font and size.
-func buildFontAtlas(fontPath string, size float64) (atlas *fontAtlas, err error) {
-	var fontBytes []byte
-	if fontBytes, err = os.ReadFile(fontPath); err != nil {
-		err = fmt.Errorf("read font %q: %w", fontPath, err)
+// buildFontAtlas creates a font atlas for the specified loaded font and size.
+func buildFontAtlas(handle *FontHandle, size float64) (atlas *fontAtlas, err error) {
+	if handle == nil || handle.parsed == nil {
+		err = fmt.Errorf("nil font handle")
 		return
 	}
 
-	var parsed *opentype.Font
-	if parsed, err = opentype.Parse(fontBytes); err != nil {
-		err = fmt.Errorf("parse font %q: %w", fontPath, err)
+	if size <= 0 {
+		err = fmt.Errorf("font size must be positive")
 		return
 	}
 
 	var face font.Face
-	if face, err = opentype.NewFace(parsed, &opentype.FaceOptions{
+	if face, err = opentype.NewFace(handle.parsed, &opentype.FaceOptions{
 		Size:    size,
 		DPI:     72,
 		Hinting: font.HintingFull,
 	}); err != nil {
-		err = fmt.Errorf("create font face: %w", err)
+		err = fmt.Errorf("create font face %q at %.2fpx: %w", handle.path, size, err)
 		return
 	}
 
@@ -119,7 +189,7 @@ func buildFontAtlas(fontPath string, size float64) (atlas *fontAtlas, err error)
 		}
 
 		if y+cellH >= atlasHeight {
-			err = fmt.Errorf("font atlas overflow at rune %q", r)
+			err = fmt.Errorf("font atlas overflow at rune %q for %q at %.2fpx", r, handle.path, size)
 			return
 		}
 
@@ -152,6 +222,16 @@ func buildFontAtlas(fontPath string, size float64) (atlas *fontAtlas, err error)
 		if cellH > rowH {
 			rowH = cellH
 		}
+	}
+
+	return
+}
+
+func cleanFontPath(filePath string) (cleaned string, err error) {
+	cleaned = filepath.Clean(strings.TrimSpace(filePath))
+	if cleaned == "" || cleaned == "." || cleaned == string(filepath.Separator) {
+		err = fmt.Errorf("invalid font path %q", filePath)
+		return
 	}
 
 	return

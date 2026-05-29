@@ -29,8 +29,8 @@ const (
 
 var vertexStride = uint64(unsafe.Sizeof(vertex{}))
 
-// NewContext creates a new UI renderer with the specified font.
-// The fontPath should point to a .ttf file on the user's system, and fontSize is the desired pixel size for rendering text.
+// NewContext creates a new UI renderer with the specified default font.
+// The fontPath should point to a .ttf/.otf file on the user's system, and fontSize is the default pixel size for rendering text.
 // If fontPath is empty, it will attempt to find a common system font automatically.
 func NewContext(device *wgpu.Device, targetFormat gputypes.TextureFormat, fontPath string, fontSize float64) (renderer *Context, err error) {
 	if device == nil {
@@ -38,16 +38,17 @@ func NewContext(device *wgpu.Device, targetFormat gputypes.TextureFormat, fontPa
 		return
 	}
 
-	var atlas *fontAtlas
-	if atlas, err = buildFontAtlas(fontPath, fontSize); err != nil {
+	var defaultFont *FontHandle
+	if defaultFont, err = LoadFont(fontPath); err != nil {
 		return
 	}
 
 	renderer = &Context{
 		device:        device,
 		targetFormat:  targetFormat,
-		atlas:         atlas,
 		imageGroups:   make(map[*gimage.Image]*wgpu.BindGroup),
+		fontFaces:     make(map[fontFaceKey]*fontFace),
+		defaultFont:   defaultFont,
 		vertices:      make([]vertex, 0, 1024),
 		batches:       make([]batch, 0, 128),
 		fillStyle:     ColorWhite,
@@ -59,13 +60,19 @@ func NewContext(device *wgpu.Device, targetFormat gputypes.TextureFormat, fontPa
 		path:          make([]pathCommand, 0, 128),
 	}
 
-	if err = renderer.createAtlasResources(); err != nil {
+	if err = renderer.createFontSampler(); err != nil {
 		renderer.Release()
 		renderer = nil
 		return
 	}
 
 	if err = renderer.createPipeline(targetFormat); err != nil {
+		renderer.Release()
+		renderer = nil
+		return
+	}
+
+	if err = renderer.SetFont(fontSize, nil); err != nil {
 		renderer.Release()
 		renderer = nil
 		return
@@ -111,80 +118,30 @@ func (r *Context) Release() {
 		r.pipelineLayout = nil
 	}
 
-	if r.atlasGroup != nil {
-		r.atlasGroup.Release()
-		r.atlasGroup = nil
+	for _, face := range r.fontFaces {
+		if face != nil {
+			face.Release()
+		}
 	}
+
+	r.fontFaces = nil
+	r.currentFont = nil
+	r.defaultFont = nil
 
 	if r.textureLayout != nil {
 		r.textureLayout.Release()
 		r.textureLayout = nil
 	}
 
-	if r.atlasSampler != nil {
-		r.atlasSampler.Release()
-		r.atlasSampler = nil
-	}
-
-	if r.atlasView != nil {
-		r.atlasView.Release()
-		r.atlasView = nil
-	}
-
-	if r.atlasTexture != nil {
-		r.atlasTexture.Release()
-		r.atlasTexture = nil
+	if r.fontSampler != nil {
+		r.fontSampler.Release()
+		r.fontSampler = nil
 	}
 }
 
-// createAtlasResources uploads the font atlas texture to the GPU and creates the associated sampler and bind group.
-func (r *Context) createAtlasResources() (err error) {
-	if r.atlasTexture, err = r.device.CreateTexture(&wgpu.TextureDescriptor{
-		Label: "Conquest UI Font Atlas",
-		Size: wgpu.Extent3D{
-			Width:              uint32(r.atlas.Width),
-			Height:             uint32(r.atlas.Height),
-			DepthOrArrayLayers: 1,
-		},
-		MipLevelCount: 1,
-		SampleCount:   1,
-		Dimension:     gputypes.TextureDimension2D,
-		Format:        gputypes.TextureFormatRGBA8Unorm,
-		Usage:         gputypes.TextureUsageTextureBinding | gputypes.TextureUsageCopyDst,
-	}); err != nil {
-		err = fmt.Errorf("create UI atlas texture: %w", err)
-		return
-	}
-
-	if err = r.device.Queue().WriteTexture(
-		&wgpu.ImageCopyTexture{
-			Texture:  r.atlasTexture,
-			MipLevel: 0,
-			Origin:   wgpu.Origin3D{X: 0, Y: 0, Z: 0},
-			Aspect:   gputypes.TextureAspectAll,
-		},
-		r.atlas.Pixels,
-		&wgpu.ImageDataLayout{
-			Offset:       0,
-			BytesPerRow:  uint32(r.atlas.Width * 4),
-			RowsPerImage: uint32(r.atlas.Height),
-		},
-		&wgpu.Extent3D{
-			Width:              uint32(r.atlas.Width),
-			Height:             uint32(r.atlas.Height),
-			DepthOrArrayLayers: 1,
-		},
-	); err != nil {
-		err = fmt.Errorf("upload UI atlas texture: %w", err)
-		return
-	}
-
-	if r.atlasView, err = r.device.CreateTextureView(r.atlasTexture, nil); err != nil {
-		err = fmt.Errorf("create UI atlas texture view: %w", err)
-		return
-	}
-
-	if r.atlasSampler, err = r.device.CreateSampler(&wgpu.SamplerDescriptor{
+// createFontSampler creates the sampler shared by all font atlas textures.
+func (r *Context) createFontSampler() (err error) {
+	if r.fontSampler, err = r.device.CreateSampler(&wgpu.SamplerDescriptor{
 		Label:        "Conquest UI Font Atlas Sampler",
 		AddressModeU: gputypes.AddressModeClampToEdge,
 		AddressModeV: gputypes.AddressModeClampToEdge,
@@ -195,9 +152,148 @@ func (r *Context) createAtlasResources() (err error) {
 		LodMinClamp:  0,
 		LodMaxClamp:  32,
 	}); err != nil {
-		err = fmt.Errorf("create UI atlas sampler: %w", err)
+		err = fmt.Errorf("create UI font atlas sampler: %w", err)
 	}
 
+	return
+}
+
+// Release frees the GPU resources associated with a cached font face.
+func (f *fontFace) Release() {
+	if f == nil {
+		return
+	}
+
+	if f.group != nil {
+		f.group.Release()
+		f.group = nil
+	}
+
+	if f.view != nil {
+		f.view.Release()
+		f.view = nil
+	}
+
+	if f.texture != nil {
+		f.texture.Release()
+		f.texture = nil
+	}
+
+	f.atlas = nil
+}
+
+// SetFont selects the active font face used by FillText and StrokeText.
+// Passing a nil handle selects the context's default font. Font faces are cached per font handle and size.
+func (r *Context) SetFont(size float64, handle *FontHandle) (err error) {
+	if r == nil {
+		err = fmt.Errorf("nil gctx2d context")
+		return
+	}
+
+	if handle == nil {
+		handle = r.defaultFont
+	}
+
+	if handle == nil {
+		err = fmt.Errorf("nil font handle")
+		return
+	}
+
+	if size <= 0 {
+		err = fmt.Errorf("font size must be positive")
+		return
+	}
+
+	if r.textureLayout == nil || r.fontSampler == nil {
+		err = fmt.Errorf("font resources are not initialized")
+		return
+	}
+
+	if r.fontFaces == nil {
+		r.fontFaces = make(map[fontFaceKey]*fontFace)
+	}
+
+	var key fontFaceKey = fontFaceKey{handle: handle, size: size}
+	if face := r.fontFaces[key]; face != nil {
+		r.currentFont = face
+		return
+	}
+
+	var atlas *fontAtlas
+	if atlas, err = buildFontAtlas(handle, size); err != nil {
+		return
+	}
+
+	face := &fontFace{
+		key:   key,
+		atlas: atlas,
+	}
+
+	defer func() {
+		if err != nil {
+			face.Release()
+		}
+	}()
+
+	if face.texture, err = r.device.CreateTexture(&wgpu.TextureDescriptor{
+		Label: "Conquest UI Font Atlas",
+		Size: wgpu.Extent3D{
+			Width:              uint32(atlas.Width),
+			Height:             uint32(atlas.Height),
+			DepthOrArrayLayers: 1,
+		},
+		MipLevelCount: 1,
+		SampleCount:   1,
+		Dimension:     gputypes.TextureDimension2D,
+		Format:        gputypes.TextureFormatRGBA8Unorm,
+		Usage:         gputypes.TextureUsageTextureBinding | gputypes.TextureUsageCopyDst,
+	}); err != nil {
+		err = fmt.Errorf("create UI font atlas texture: %w", err)
+		return
+	}
+
+	if err = r.device.Queue().WriteTexture(
+		&wgpu.ImageCopyTexture{
+			Texture:  face.texture,
+			MipLevel: 0,
+			Origin:   wgpu.Origin3D{X: 0, Y: 0, Z: 0},
+			Aspect:   gputypes.TextureAspectAll,
+		},
+		atlas.Pixels,
+		&wgpu.ImageDataLayout{
+			Offset:       0,
+			BytesPerRow:  uint32(atlas.Width * 4),
+			RowsPerImage: uint32(atlas.Height),
+		},
+		&wgpu.Extent3D{
+			Width:              uint32(atlas.Width),
+			Height:             uint32(atlas.Height),
+			DepthOrArrayLayers: 1,
+		},
+	); err != nil {
+		err = fmt.Errorf("upload UI font atlas texture: %w", err)
+		return
+	}
+
+	if face.view, err = r.device.CreateTextureView(face.texture, nil); err != nil {
+		err = fmt.Errorf("create UI font atlas texture view: %w", err)
+		return
+	}
+
+	if face.group, err = r.device.CreateBindGroup(&wgpu.BindGroupDescriptor{
+		Label:  "Conquest UI Font Atlas Bind Group",
+		Layout: r.textureLayout,
+		Entries: []wgpu.BindGroupEntry{
+			{Binding: 0, Sampler: r.fontSampler},
+			{Binding: 1, TextureView: face.view},
+		},
+	}); err != nil {
+		err = fmt.Errorf("create UI font atlas bind group: %w", err)
+		return
+	}
+
+	r.fontFaces[key] = face
+	r.currentFont = face
 	return
 }
 
@@ -244,18 +340,6 @@ func (r *Context) createPipeline(targetFormat gputypes.TextureFormat) (err error
 		BindGroupLayouts: []*wgpu.BindGroupLayout{r.textureLayout},
 	}); err != nil {
 		err = fmt.Errorf("create UI pipeline layout: %w", err)
-		return
-	}
-
-	if r.atlasGroup, err = r.device.CreateBindGroup(&wgpu.BindGroupDescriptor{
-		Label:  "Conquest UI Atlas Bind Group",
-		Layout: r.textureLayout,
-		Entries: []wgpu.BindGroupEntry{
-			{Binding: 0, Sampler: r.atlasSampler},
-			{Binding: 1, TextureView: r.atlasView},
-		},
-	}); err != nil {
-		err = fmt.Errorf("create UI atlas bind group: %w", err)
 		return
 	}
 
@@ -702,19 +786,66 @@ func (r *Context) appendImageClipBounds(img *gimage.Image, transform Matrix, x, 
 	r.appendBatch(pipeline, group, uniform, start, 6)
 }
 
-// Text draws an ASCII-oriented text run. x/y use the same baseline coordinate
-// convention as gg.DrawString, which makes porting the old HUD calls easy.
-func (r *Context) Text(x, baselineY float32, s string, color Color) {
-	if r.atlas == nil || len(s) == 0 {
+// FillText draws an ASCII-oriented text run with the current fill style.
+// x/y use the same baseline coordinate convention as gg.DrawString.
+// If no font has been selected with SetFont, this is a no-op.
+func (r *Context) FillText(s string, x, baselineY float32) {
+	r.appendTextRun(s, x, baselineY, r.fillStyle)
+}
+
+// StrokeText draws an ASCII-oriented text stroke with the current stroke style and line width.
+// It uses the active font face selected by SetFont. If no font has been selected, this is a no-op.
+func (r *Context) StrokeText(s string, x, baselineY float32) {
+	if r == nil || len(s) == 0 || r.currentFont == nil || r.lineWidth <= 0 {
 		return
 	}
 
-	var startX, penX, penY float32 = x, x, baselineY
+	var radius float32 = float32(math.Ceil(float64(r.lineWidth)))
+	if radius < 1 {
+		radius = 1
+	}
+
+	var steps int = int(radius)
+	for oy := -steps; oy <= steps; oy++ {
+		for ox := -steps; ox <= steps; ox++ {
+			if ox == 0 && oy == 0 {
+				continue
+			}
+
+			dx, dy := float32(ox), float32(oy)
+			if dx*dx+dy*dy > radius*radius {
+				continue
+			}
+
+			r.appendTextRun(s, x+dx, baselineY+dy, r.strokeStyle)
+		}
+	}
+}
+
+// Text is kept as a compatibility wrapper for the old immediate-color API.
+// Deprecated: use SetFillStyle followed by FillText.
+func (r *Context) Text(x, baselineY float32, s string, color Color) {
+	oldFill := r.fillStyle
+	r.fillStyle = color
+	r.FillText(s, x, baselineY)
+	r.fillStyle = oldFill
+}
+
+func (r *Context) appendTextRun(s string, x, baselineY float32, color Color) {
+	if r == nil || len(s) == 0 || r.currentFont == nil || r.currentFont.atlas == nil || r.currentFont.group == nil {
+		return
+	}
+
+	var (
+		face               *fontFace  = r.currentFont
+		atlas              *fontAtlas = face.atlas
+		startX, penX, penY float32    = x, x, baselineY
+	)
 
 	for _, ch := range s {
 		if ch == '\n' {
 			penX = startX
-			penY += r.atlas.LineHeight
+			penY += atlas.LineHeight
 			continue
 		}
 
@@ -723,8 +854,8 @@ func (r *Context) Text(x, baselineY float32, s string, color Color) {
 			ok bool
 		)
 
-		if g, ok = r.atlas.Glyphs[ch]; !ok {
-			if g, ok = r.atlas.Glyphs['?']; !ok {
+		if g, ok = atlas.Glyphs[ch]; !ok {
+			if g, ok = atlas.Glyphs['?']; !ok {
 				continue
 			}
 		}
@@ -739,7 +870,7 @@ func (r *Context) Text(x, baselineY float32, s string, color Color) {
 				p3     Point   = r.transformPoint(x0, y1)
 			)
 
-			r.appendTextQuad(p0, p1, p2, p3, g, color)
+			r.appendTextQuad(face, p0, p1, p2, p3, g, color)
 		}
 
 		penX += g.Advance
@@ -988,7 +1119,7 @@ func (r *Context) appendSolidTriangle(a, b, c Point, color Color) {
 	r.appendSolidVertex(a.X, a.Y, color)
 	r.appendSolidVertex(b.X, b.Y, color)
 	r.appendSolidVertex(c.X, c.Y, color)
-	r.appendBatch(nil, r.atlasGroup, nil, start, 3)
+	r.appendBatch(nil, r.activeTextureGroup(), nil, start, 3)
 }
 
 // appendSolidVertex appends one vertex for simple solid geometry.
@@ -1004,7 +1135,7 @@ func (r *Context) appendSolidVertex(x, y float32, color Color) {
 }
 
 // appendTextQuad adds a possibly transformed quad for a single glyph to the vertex buffer, using the glyph's atlas UVs and the specified color.
-func (r *Context) appendTextQuad(p0, p1, p2, p3 Point, g glyph, color Color) {
+func (r *Context) appendTextQuad(face *fontFace, p0, p1, p2, p3 Point, g glyph, color Color) {
 	start := uint32(len(r.vertices))
 	var positions [6]Point = [6]Point{
 		p0,
@@ -1034,7 +1165,7 @@ func (r *Context) appendTextQuad(p0, p1, p2, p3 Point, g glyph, color Color) {
 		})
 	}
 
-	r.appendBatch(nil, r.atlasGroup, nil, start, 6)
+	r.appendBatch(nil, face.group, nil, start, 6)
 }
 
 // appendQuad is a helper function that appends vertices for a quad defined by the corners (x0, y0) and (x1, y1).
@@ -1047,6 +1178,20 @@ func (r *Context) appendQuad(x0, y0, x1, y1 float32, makeVertex func(x, y float3
 		makeVertex(x1, y1),
 		makeVertex(x0, y1),
 	)
+}
+
+func (r *Context) activeTextureGroup() *wgpu.BindGroup {
+	if r.currentFont != nil && r.currentFont.group != nil {
+		return r.currentFont.group
+	}
+
+	for _, face := range r.fontFaces {
+		if face != nil && face.group != nil {
+			return face.group
+		}
+	}
+
+	return nil
 }
 
 func (r *Context) imageGroup(img *gimage.Image) (*wgpu.BindGroup, error) {

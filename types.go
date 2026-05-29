@@ -66,6 +66,19 @@ type (
 		LineHeight float32
 	}
 
+	fontFaceKey struct {
+		handle *FontHandle
+		size   float64
+	}
+
+	fontFace struct {
+		key     fontFaceKey
+		atlas   *fontAtlas
+		texture *wgpu.Texture
+		view    *wgpu.TextureView
+		group   *wgpu.BindGroup
+	}
+
 	pathCommandKind int
 
 	pathCommand struct {
@@ -123,13 +136,12 @@ type (
 		pipeline       *wgpu.RenderPipeline
 		pipelineLayout *wgpu.PipelineLayout
 		textureLayout  *wgpu.BindGroupLayout
-		atlasGroup     *wgpu.BindGroup
 		imageGroups    map[*gimage.Image]*wgpu.BindGroup
 
-		atlasTexture *wgpu.Texture
-		atlasView    *wgpu.TextureView
-		atlasSampler *wgpu.Sampler
-		atlas        *fontAtlas
+		fontSampler *wgpu.Sampler
+		defaultFont *FontHandle
+		currentFont *fontFace
+		fontFaces   map[fontFaceKey]*fontFace
 
 		vertexBuffer   *wgpu.Buffer
 		vertexCapacity int
