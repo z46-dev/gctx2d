@@ -822,15 +822,6 @@ func (r *Context) StrokeText(s string, x, baselineY float32) {
 	}
 }
 
-// Text is kept as a compatibility wrapper for the old immediate-color API.
-// Deprecated: use SetFillStyle followed by FillText.
-func (r *Context) Text(x, baselineY float32, s string, color Color) {
-	oldFill := r.fillStyle
-	r.fillStyle = color
-	r.FillText(s, x, baselineY)
-	r.fillStyle = oldFill
-}
-
 func (r *Context) appendTextRun(s string, x, baselineY float32, color Color) {
 	if r == nil || len(s) == 0 || r.currentFont == nil || r.currentFont.atlas == nil || r.currentFont.group == nil {
 		return
