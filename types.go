@@ -33,6 +33,11 @@ type (
 		F float32
 	}
 
+	TransformState struct {
+		ObjectBase Matrix
+		Current    Matrix
+	}
+
 	vertex struct {
 		Position    [2]float32
 		Local       [2]float32

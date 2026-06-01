@@ -482,46 +482,78 @@ func (r *Context) SetEffectTime(seconds float32) {
 	r.effectTime = seconds
 }
 
-// ResetTransform restores the current canvas-style transform to the identity matrix.
-// It does not clear the object/world base used by SetObjectTransform.
-func (r *Context) ResetTransform() {
+func (r *Context) transformState() TransformState {
+	return TransformState{
+		ObjectBase: r.rootTransform,
+		Current:    r.transform,
+	}
+}
+
+// TransformState returns the current transform snapshot, including the object/world base.
+func (r *Context) TransformState() TransformState {
+	return r.transformState()
+}
+
+// RestoreTransform restores a previously captured transform snapshot and returns the prior state.
+func (r *Context) RestoreTransform(state TransformState) (previous TransformState) {
+	previous = r.transformState()
+	r.rootTransform = state.ObjectBase
+	r.transform = state.Current
+	return
+}
+
+// ResetTransform restores the current canvas-style transform to the identity matrix and returns the prior state.
+func (r *Context) ResetTransform() (previous TransformState) {
+	previous = r.transformState()
 	r.transform = uiIdentityMatrix()
+	return
 }
 
 // SetTransform replaces the current canvas-style transform with the specified affine matrix
-// and updates the object/world base used by SetObjectTransform.
+// and updates the object/world base used by SetObjectTransform. It returns the prior state.
 // The coefficients follow the HTML canvas convention: x' = a*x + c*y + e, y' = b*x + d*y + f.
-func (r *Context) SetTransform(a, b, c, d, e, f float32) {
+func (r *Context) SetTransform(a, b, c, d, e, f float32) (previous TransformState) {
+	previous = r.transformState()
 	r.rootTransform = Matrix{A: a, B: b, C: c, D: d, E: e, F: f}
 	r.transform = r.rootTransform
+	return
 }
 
-// Transform post-multiplies the current canvas-style transform by the specified affine matrix.
-func (r *Context) Transform(a, b, c, d, e, f float32) {
+// Transform post-multiplies the current canvas-style transform by the specified affine matrix and returns the prior state.
+func (r *Context) Transform(a, b, c, d, e, f float32) (previous TransformState) {
+	previous = r.transformState()
 	r.transform = r.transform.Mul(Matrix{A: a, B: b, C: c, D: d, E: e, F: f})
+	return
 }
 
 // SetMatrixTransform replaces the current canvas-style transform with the provided matrix
-// and updates the object/world base used by SetObjectTransform.
-func (r *Context) SetMatrixTransform(transform Matrix) {
+// and updates the object/world base used by SetObjectTransform. It returns the prior state.
+func (r *Context) SetMatrixTransform(transform Matrix) (previous TransformState) {
+	previous = r.transformState()
 	r.rootTransform = transform
 	r.transform = r.rootTransform
+	return
 }
 
-// TransformMatrix post-multiplies the current canvas-style transform by the provided matrix.
-func (r *Context) TransformMatrix(transform Matrix) {
+// TransformMatrix post-multiplies the current canvas-style transform by the provided matrix and returns the prior state.
+func (r *Context) TransformMatrix(transform Matrix) (previous TransformState) {
+	previous = r.transformState()
 	r.transform = r.transform.Mul(transform)
+	return
 }
 
 // SetObjectTransform sets the current canvas-style transform to the frame/root transform
 // composed with an object-local translation, uniform scale, and rotation. Rotation is in radians.
-func (r *Context) SetObjectTransform(x, y, size, rotation float32) {
+// It returns the prior state.
+func (r *Context) SetObjectTransform(x, y, size, rotation float32) (previous TransformState) {
+	previous = r.transformState()
 	r.transform = r.rootTransform.Mul(NewUniformTransformMatrix(x, y, size, rotation))
+	return
 }
 
 // SetTransformPolite is kept as a compatibility alias for SetObjectTransform.
-func (r *Context) SetTransformPolite(x, y, size, rotation float32) {
-	r.SetObjectTransform(x, y, size, rotation)
+func (r *Context) SetTransformPolite(x, y, size, rotation float32) TransformState {
+	return r.SetObjectTransform(x, y, size, rotation)
 }
 
 // BeginPath clears the current canvas-style path.
