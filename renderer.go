@@ -45,20 +45,20 @@ func NewContext(device *wgpu.Device, targetFormat gputypes.TextureFormat) (rende
 	}
 
 	renderer = &Context{
-		device:        device,
-		targetFormat:  targetFormat,
-		imageGroups:   make(map[*gimage.Image]*wgpu.BindGroup),
-		fontFaces:     make(map[fontFaceKey]*fontFace),
-		defaultFont:   defaultFont,
-		vertices:      make([]vertex, 0, 1024),
-		batches:       make([]batch, 0, 128),
-		fillStyle:     ColorWhite,
-		strokeStyle:   ColorWhite,
-		lineWidth:     1,
-		rootTransform: uiIdentityMatrix(),
-		transform:     uiIdentityMatrix(),
-		imageEffect:   ImageEffectNone,
-		path:          make([]pathCommand, 0, 128),
+		device:       device,
+		targetFormat: targetFormat,
+		imageGroups:  make(map[*gimage.Image]*wgpu.BindGroup),
+		fontFaces:    make(map[fontFaceKey]*fontFace),
+		defaultFont:  defaultFont,
+		vertices:     make([]vertex, 0, 1024),
+		batches:      make([]batch, 0, 128),
+		fillStyle:    ColorWhite,
+		strokeStyle:  ColorWhite,
+		lineWidth:    1,
+		transform:    uiIdentityMatrix(),
+		imageEffect:  ImageEffectNone,
+		stateStack:   make([]drawingState, 0, 32),
+		path:         make([]pathCommand, 0, 128),
 	}
 
 	if err = renderer.createFontSampler(); err != nil {
@@ -413,9 +413,11 @@ func (r *Context) Begin(width, height int) {
 	r.vertices = r.vertices[:0]
 	r.batches = r.batches[:0]
 	r.path = r.path[:0]
-	r.rootTransform = uiIdentityMatrix()
-	r.transform = r.rootTransform
+	r.transform = uiIdentityMatrix()
 	r.imageEffect = ImageEffectNone
+	r.currentImageShader = nil
+	r.effectTime = 0
+	r.stateStack = r.stateStack[:0]
 }
 
 // SetFillStyle sets the color used by Fill.
@@ -482,59 +484,91 @@ func (r *Context) SetEffectTime(seconds float32) {
 	r.effectTime = seconds
 }
 
-func (r *Context) transformState() TransformState {
-	return TransformState{
-		ObjectBase: r.rootTransform,
-		Current:    r.transform,
+func (r *Context) drawingState() drawingState {
+	return drawingState{
+		fillStyle:          r.fillStyle,
+		strokeStyle:        r.strokeStyle,
+		lineWidth:          r.lineWidth,
+		textAlign:          r.textAlign,
+		textBaseline:       r.textBaseline,
+		transform:          r.transform,
+		imageEffect:        r.imageEffect,
+		effectTime:         r.effectTime,
+		currentImageShader: r.currentImageShader,
+		currentFont:        r.currentFont,
 	}
 }
 
-// RestoreTransform restores a previously captured transform snapshot and returns the prior state.
-func (r *Context) RestoreTransform(state TransformState) (previous TransformState) {
-	previous = r.transformState()
-	r.rootTransform = state.ObjectBase
-	r.transform = state.Current
-	return
+func (r *Context) restoreDrawingState(state drawingState) {
+	r.fillStyle = state.fillStyle
+	r.strokeStyle = state.strokeStyle
+	r.lineWidth = state.lineWidth
+	r.textAlign = state.textAlign
+	r.textBaseline = state.textBaseline
+	r.transform = state.transform
+	r.imageEffect = state.imageEffect
+	r.effectTime = state.effectTime
+	r.currentImageShader = state.currentImageShader
+	r.currentFont = state.currentFont
 }
 
-// ResetTransform restores the current canvas-style transform to the identity matrix and returns the prior state.
-func (r *Context) ResetTransform() (previous TransformState) {
-	previous = r.transformState()
+// Save pushes the current drawing state onto the stack.
+func (r *Context) Save() {
+	r.stateStack = append(r.stateStack, r.drawingState())
+}
+
+// Restore pops the most recently saved drawing state from the stack.
+func (r *Context) Restore() {
+	if len(r.stateStack) == 0 {
+		return
+	}
+
+	last := len(r.stateStack) - 1
+	state := r.stateStack[last]
+	r.stateStack = r.stateStack[:last]
+	r.restoreDrawingState(state)
+}
+
+// GetTransform returns the current transform matrix.
+func (r *Context) GetTransform() Matrix {
+	return r.transform
+}
+
+// ResetTransform restores the current canvas-style transform to the identity matrix.
+func (r *Context) ResetTransform() {
 	r.transform = uiIdentityMatrix()
-	return
 }
 
-// SetTransform replaces the current canvas-style transform with the specified affine matrix
-// and updates the object/world base used by SetObjectTransform. It returns the prior state.
+// SetTransform replaces the current canvas-style transform with the specified affine matrix.
 // The coefficients follow the HTML canvas convention: x' = a*x + c*y + e, y' = b*x + d*y + f.
-func (r *Context) SetTransform(a, b, c, d, e, f float32) (previous TransformState) {
-	previous = r.transformState()
-	r.rootTransform = Matrix{A: a, B: b, C: c, D: d, E: e, F: f}
-	r.transform = r.rootTransform
-	return
+func (r *Context) SetTransform(a, b, c, d, e, f float32) {
+	r.transform = Matrix{A: a, B: b, C: c, D: d, E: e, F: f}
 }
 
-// Transform post-multiplies the current canvas-style transform by the specified affine matrix and returns the prior state.
-func (r *Context) Transform(a, b, c, d, e, f float32) (previous TransformState) {
-	previous = r.transformState()
+// Transform post-multiplies the current canvas-style transform by the specified affine matrix.
+func (r *Context) Transform(a, b, c, d, e, f float32) {
 	r.transform = r.transform.Mul(Matrix{A: a, B: b, C: c, D: d, E: e, F: f})
-	return
 }
 
-// SetMatrixTransform replaces the current canvas-style transform with the provided matrix
-// and updates the object/world base used by SetObjectTransform. It returns the prior state.
-func (r *Context) SetMatrixTransform(transform Matrix) (previous TransformState) {
-	previous = r.transformState()
-	r.rootTransform = transform
-	r.transform = r.rootTransform
-	return
+// SetMatrixTransform replaces the current canvas-style transform with the provided matrix.
+func (r *Context) SetMatrixTransform(transform Matrix) {
+	r.transform = transform
 }
 
-// TransformMatrix post-multiplies the current canvas-style transform by the provided matrix and returns the prior state.
-func (r *Context) TransformMatrix(transform Matrix) (previous TransformState) {
-	previous = r.transformState()
+// TransformMatrix post-multiplies the current canvas-style transform by the provided matrix.
+func (r *Context) TransformMatrix(transform Matrix) {
 	r.transform = r.transform.Mul(transform)
-	return
+}
+
+// SetObjectTransform composes an object-local translation, uniform scale, and rotation with the current transform.
+// Rotation is in radians.
+func (r *Context) SetObjectTransform(x, y, size, rotation float32) {
+	r.TransformMatrix(NewUniformTransformMatrix(x, y, size, rotation))
+}
+
+// SetTransformPolite is kept as a compatibility alias for SetObjectTransform.
+func (r *Context) SetTransformPolite(x, y, size, rotation float32) {
+	r.SetObjectTransform(x, y, size, rotation)
 }
 
 // BeginPath clears the current canvas-style path.
@@ -1182,6 +1216,31 @@ func (r *Context) appendStrokePath(points []Point, closed bool, lineWidth float3
 	if closed {
 		r.appendStrokeSegment(points[len(points)-1], points[0], lineWidth, color)
 	}
+
+	joinCount := len(points) - 2
+	if closed {
+		joinCount = len(points)
+	}
+
+	for i := 0; i < joinCount; i++ {
+		var (
+			prev Point
+			curr Point
+			next Point
+		)
+
+		if closed {
+			prev = points[(i+len(points)-1)%len(points)]
+			curr = points[i]
+			next = points[(i+1)%len(points)]
+		} else {
+			prev = points[i]
+			curr = points[i+1]
+			next = points[i+2]
+		}
+
+		r.appendStrokeJoin(prev, curr, next, lineWidth, color)
+	}
 }
 
 // appendStrokeSegment appends one stroked line segment as a rectangle.
@@ -1210,6 +1269,49 @@ func (r *Context) appendStrokeSegment(a, b Point, lineWidth float32, color Color
 
 	r.appendSolidTriangle(p0, p1, p2, color)
 	r.appendSolidTriangle(p0, p2, p3, color)
+}
+
+// appendStrokeJoin fills the outer wedge between adjacent stroked segments so curved and angled
+// paths do not show seams where segment quads meet.
+func (r *Context) appendStrokeJoin(a, b, c Point, lineWidth float32, color Color) {
+	if lineWidth <= 0 {
+		lineWidth = 1
+	}
+
+	var (
+		dx0, dy0 float32 = b.X - a.X, b.Y - a.Y
+		dx1, dy1 float32 = c.X - b.X, c.Y - b.Y
+		len0Sq   float32 = dx0*dx0 + dy0*dy0
+		len1Sq   float32 = dx1*dx1 + dy1*dy1
+	)
+
+	if len0Sq <= 0 || len1Sq <= 0 {
+		return
+	}
+
+	var (
+		len0      float32 = float32(math.Sqrt(float64(len0Sq)))
+		len1      float32 = float32(math.Sqrt(float64(len1Sq)))
+		halfWidth float32 = lineWidth * 0.5
+		n0x, n0y  float32 = -dy0 / len0 * halfWidth, dx0 / len0 * halfWidth
+		n1x, n1y  float32 = -dy1 / len1 * halfWidth, dx1 / len1 * halfWidth
+		cross     float32 = dx0*dy1 - dy0*dx1
+		epsilon   float32 = 0.0001
+		outer0    Point
+		outer1    Point
+	)
+
+	if cross > epsilon {
+		outer0 = Point{X: b.X + n0x, Y: b.Y + n0y}
+		outer1 = Point{X: b.X + n1x, Y: b.Y + n1y}
+	} else if cross < -epsilon {
+		outer0 = Point{X: b.X - n0x, Y: b.Y - n0y}
+		outer1 = Point{X: b.X - n1x, Y: b.Y - n1y}
+	} else {
+		return
+	}
+
+	r.appendSolidTriangle(b, outer0, outer1, color)
 }
 
 // appendSolidTriangle appends a triangle that uses the normal solid/SDF branch with radius zero.
@@ -1482,6 +1584,11 @@ func NewTransformMatrix(x, y, scaleX, scaleY, rotation float32) Matrix {
 		E: x,
 		F: y,
 	}
+}
+
+// NewUniformTransformMatrix returns a translation/rotation/uniform-scale affine transform.
+func NewUniformTransformMatrix(x, y, scale, rotation float32) Matrix {
+	return NewTransformMatrix(x, y, scale, scale, rotation)
 }
 
 // Mul composes two affine transforms using the HTML canvas convention current = current * next.

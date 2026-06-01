@@ -33,9 +33,17 @@ type (
 		F float32
 	}
 
-	TransformState struct {
-		ObjectBase Matrix
-		Current    Matrix
+	drawingState struct {
+		fillStyle          Color
+		strokeStyle        Color
+		lineWidth          float32
+		textAlign          TextAlign
+		textBaseline       TextBaseline
+		transform          Matrix
+		imageEffect        ImageEffect
+		effectTime         float32
+		currentImageShader ImageShaderBinding
+		currentFont        *fontFace
 	}
 
 	vertex struct {
@@ -167,11 +175,11 @@ type (
 		lineWidth          float32
 		textAlign          TextAlign
 		textBaseline       TextBaseline
-		rootTransform      Matrix
 		transform          Matrix
 		imageEffect        ImageEffect
 		effectTime         float32
 		currentImageShader ImageShaderBinding
+		stateStack         []drawingState
 		path               []pathCommand
 
 		pending []submission
