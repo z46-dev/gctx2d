@@ -1253,18 +1253,6 @@ func (r *Context) appendTextQuad(face *fontFace, p0, p1, p2, p3 Point, g glyph, 
 	r.appendBatch(nil, face.group, nil, start, 6)
 }
 
-// appendQuad is a helper function that appends vertices for a quad defined by the corners (x0, y0) and (x1, y1).
-func (r *Context) appendQuad(x0, y0, x1, y1 float32, makeVertex func(x, y float32) vertex) {
-	r.vertices = append(r.vertices,
-		makeVertex(x0, y0),
-		makeVertex(x1, y0),
-		makeVertex(x1, y1),
-		makeVertex(x0, y0),
-		makeVertex(x1, y1),
-		makeVertex(x0, y1),
-	)
-}
-
 func (r *Context) activeTextureGroup() *wgpu.BindGroup {
 	if r.currentFont != nil && r.currentFont.group != nil {
 		return r.currentFont.group

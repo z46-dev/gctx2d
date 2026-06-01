@@ -6,7 +6,6 @@ import (
 	"image/draw"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"sync"
 
@@ -91,17 +90,6 @@ func FromGoImage(device *wgpu.Device, name string, stdImg image.Image) (img *Ima
 		return
 	}
 
-	return
-}
-
-// FromOffscreen creates a new Image from an OffscreenCanvas's image.
-func FromOffscreen(device *wgpu.Device, name string, canvas *OffscreenCanvas) (img *Image, err error) {
-	if canvas == nil || canvas.Image == nil {
-		err = fmt.Errorf("nil offscreen canvas")
-		return
-	}
-
-	img, err = FromGoImage(device, name, canvas.Image)
 	return
 }
 
@@ -333,9 +321,4 @@ func clean(name string) (cleaned string, err error) {
 // assetName extracts the base name of the file without extension to use as the image's name.
 func assetName(name string) string {
 	return strings.TrimSuffix(filepath.Base(name), filepath.Ext(name))
-}
-
-// isSupported checks if the file extension of the given name is one of the supported image formats.
-func isSupported(name string) bool {
-	return slices.Contains([]string{".gif", ".jpeg", ".jpg", ".png"}, strings.ToLower(filepath.Ext(name)))
 }
