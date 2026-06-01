@@ -551,9 +551,12 @@ func (r *Context) SetObjectTransform(x, y, size, rotation float32) (previous Tra
 	return
 }
 
-// SetTransformPolite is kept as a compatibility alias for SetObjectTransform.
-func (r *Context) SetTransformPolite(x, y, size, rotation float32) TransformState {
-	return r.SetObjectTransform(x, y, size, rotation)
+// ObjectTransform post-multiplies the current canvas-style transform by an object-local translation, uniform scale, and rotation
+// composed with the frame/root transform. Rotation is in radians. It returns the prior state.
+func (r *Context) ObjectTransform(x, y, size, rotation float32) (previous TransformState) {
+	previous = r.transformState()
+	r.transform = r.transform.Mul(NewUniformTransformMatrix(x, y, size, rotation))
+	return
 }
 
 // BeginPath clears the current canvas-style path.
