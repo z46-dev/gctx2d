@@ -482,14 +482,14 @@ func (r *Context) SetEffectTime(seconds float32) {
 	r.effectTime = seconds
 }
 
-// ResetTransform restores the current canvas-style transform to the frame/root transform.
-// Use SetTransform/SetMatrixTransform once per frame or layer to establish that root,
-// then use SetObjectTransform/Transform for individual objects.
+// ResetTransform restores the current canvas-style transform to the identity matrix.
+// It does not clear the object/world base used by SetObjectTransform.
 func (r *Context) ResetTransform() {
-	r.transform = r.rootTransform
+	r.transform = uiIdentityMatrix()
 }
 
-// SetTransform replaces the current canvas-style transform with the specified affine matrix.
+// SetTransform replaces the current canvas-style transform with the specified affine matrix
+// and updates the object/world base used by SetObjectTransform.
 // The coefficients follow the HTML canvas convention: x' = a*x + c*y + e, y' = b*x + d*y + f.
 func (r *Context) SetTransform(a, b, c, d, e, f float32) {
 	r.rootTransform = Matrix{A: a, B: b, C: c, D: d, E: e, F: f}
@@ -501,7 +501,8 @@ func (r *Context) Transform(a, b, c, d, e, f float32) {
 	r.transform = r.transform.Mul(Matrix{A: a, B: b, C: c, D: d, E: e, F: f})
 }
 
-// SetMatrixTransform replaces the current canvas-style transform with the provided matrix.
+// SetMatrixTransform replaces the current canvas-style transform with the provided matrix
+// and updates the object/world base used by SetObjectTransform.
 func (r *Context) SetMatrixTransform(transform Matrix) {
 	r.rootTransform = transform
 	r.transform = r.rootTransform
