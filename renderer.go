@@ -489,11 +489,6 @@ func (r *Context) transformState() TransformState {
 	}
 }
 
-// TransformState returns the current transform snapshot, including the object/world base.
-func (r *Context) TransformState() TransformState {
-	return r.transformState()
-}
-
 // RestoreTransform restores a previously captured transform snapshot and returns the prior state.
 func (r *Context) RestoreTransform(state TransformState) (previous TransformState) {
 	previous = r.transformState()
@@ -539,23 +534,6 @@ func (r *Context) SetMatrixTransform(transform Matrix) (previous TransformState)
 func (r *Context) TransformMatrix(transform Matrix) (previous TransformState) {
 	previous = r.transformState()
 	r.transform = r.transform.Mul(transform)
-	return
-}
-
-// SetObjectTransform sets the current canvas-style transform to the frame/root transform
-// composed with an object-local translation, uniform scale, and rotation. Rotation is in radians.
-// It returns the prior state.
-func (r *Context) SetObjectTransform(x, y, size, rotation float32) (previous TransformState) {
-	previous = r.transformState()
-	r.transform = r.rootTransform.Mul(NewUniformTransformMatrix(x, y, size, rotation))
-	return
-}
-
-// ObjectTransform post-multiplies the current canvas-style transform by an object-local translation, uniform scale, and rotation
-// composed with the frame/root transform. Rotation is in radians. It returns the prior state.
-func (r *Context) ObjectTransform(x, y, size, rotation float32) (previous TransformState) {
-	previous = r.transformState()
-	r.transform = r.transform.Mul(NewUniformTransformMatrix(x, y, size, rotation))
 	return
 }
 
@@ -1504,11 +1482,6 @@ func NewTransformMatrix(x, y, scaleX, scaleY, rotation float32) Matrix {
 		E: x,
 		F: y,
 	}
-}
-
-// NewUniformTransformMatrix returns a translation/rotation/uniform-scale affine transform.
-func NewUniformTransformMatrix(x, y, scale, rotation float32) Matrix {
-	return NewTransformMatrix(x, y, scale, scale, rotation)
 }
 
 // Mul composes two affine transforms using the HTML canvas convention current = current * next.
