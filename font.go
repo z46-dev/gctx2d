@@ -76,37 +76,91 @@ func DefaultFontName() (name string) {
 		fonts              []string = findfont.List()
 		bestChoicesInOrder          = []string{
 			"Arial",
+			"Cantarell",
 			"DejaVu Sans",
 			"FreeSans",
 			"Helvetica",
 			"Liberation Sans",
 			"Noto Sans",
+			"Adwaita Sans",
+			"Droid Sans",
 		}
 	)
 
-	// Transform bestChoicesInOrder to also have lowercase and no space variants (_, -, and nothing) for more robust matching.
-	var extendedBestChoices []string
-	for _, baseName := range bestChoicesInOrder {
-		extendedBestChoices = append(extendedBestChoices,
-			baseName,
-			strings.ToLower(baseName),
-			strings.ReplaceAll(baseName, " ", ""),
-			strings.ReplaceAll(baseName, " ", "_"),
-			strings.ReplaceAll(baseName, " ", "-"),
-		)
+	if len(fonts) == 0 {
+		return
 	}
+
+	var preferredMatch string
+	var sansFallback string
+	var firstFont string
 
 	for _, fontPath := range fonts {
 		var fontName string = filepath.Base(fontPath)
 		fontName = strings.TrimSuffix(fontName, filepath.Ext(fontName))
+		if firstFont == "" {
+			firstFont = fontName
+		}
 
-		if slices.Contains(extendedBestChoices, fontName) {
-			name = fontName
-			return
+		var normalizedFontName string = normalizeFontLookupName(fontName)
+		var isRegular bool = isRegularFontVariant(normalizedFontName)
+
+		for _, baseName := range bestChoicesInOrder {
+			var normalizedChoice string = normalizeFontLookupName(baseName)
+			if normalizedFontName == normalizedChoice || strings.HasPrefix(normalizedFontName, normalizedChoice) {
+				if isRegular {
+					return fontName
+				}
+				if preferredMatch == "" {
+					preferredMatch = fontName
+				}
+				break
+			}
+		}
+
+		if sansFallback == "" && strings.Contains(normalizedFontName, "sans") && isRegular {
+			sansFallback = fontName
 		}
 	}
 
+	if preferredMatch != "" {
+		name = preferredMatch
+		return
+	}
+
+	if sansFallback != "" {
+		name = sansFallback
+		return
+	}
+
+	if firstFont != "" {
+		name = firstFont
+		return
+	}
+
 	return
+}
+
+func normalizeFontLookupName(name string) string {
+	name = strings.ToLower(name)
+	name = strings.ReplaceAll(name, " ", "")
+	name = strings.ReplaceAll(name, "-", "")
+	name = strings.ReplaceAll(name, "_", "")
+	return name
+}
+
+func isRegularFontVariant(normalizedName string) bool {
+	var regularMarkers = []string{"regular", "roman", "book", "normal"}
+	for _, marker := range regularMarkers {
+		if strings.Contains(normalizedName, marker) {
+			return true
+		}
+	}
+
+	var nonRegularMarkers = []string{"bold", "italic", "oblique", "light", "medium", "semibold", "extrabold", "black", "thin"}
+	return !slices.ContainsFunc(nonRegularMarkers, func(marker string) bool {
+		return strings.Contains(normalizedName, marker)
+	})
 }
 
 // LoadFont loads and parses a TrueType/OpenType font file and returns a reusable handle.
