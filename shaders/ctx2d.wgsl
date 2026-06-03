@@ -60,7 +60,7 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
     // kind >= 1.5: full-color image quad.
     if (input.kind < 0.5) {
         let d = rounded_rect_sdf(input.local, input.half_size, input.radius);
-        let aa = max(fwidth(d), 1.0);
+        let aa = max(length(vec2<f32>(dpdx(d), dpdy(d))), 0.5);
 
         var coverage: f32;
         if (input.stroke_width > 0.0) {

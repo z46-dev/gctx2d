@@ -1216,34 +1216,10 @@ func (r *Context) appendStrokePath(points []Point, closed bool, lineWidth float3
 	if closed {
 		r.appendStrokeSegment(points[len(points)-1], points[0], lineWidth, color)
 	}
-
-	joinCount := len(points) - 2
-	if closed {
-		joinCount = len(points)
-	}
-
-	for i := 0; i < joinCount; i++ {
-		var (
-			prev Point
-			curr Point
-			next Point
-		)
-
-		if closed {
-			prev = points[(i+len(points)-1)%len(points)]
-			curr = points[i]
-			next = points[(i+1)%len(points)]
-		} else {
-			prev = points[i]
-			curr = points[i+1]
-			next = points[i+2]
-		}
-
-		r.appendStrokeJoin(prev, curr, next, lineWidth, color)
-	}
 }
 
-// appendStrokeSegment appends one stroked line segment as a rectangle.
+// appendStrokeSegment appends one stroked line segment as an SDF capsule so the fragment shader
+// can anti-alias the contour instead of relying on hard triangle edges.
 func (r *Context) appendStrokeSegment(a, b Point, lineWidth float32, color Color) {
 	if lineWidth <= 0 {
 		lineWidth = 1
@@ -1259,59 +1235,35 @@ func (r *Context) appendStrokeSegment(a, b Point, lineWidth float32, color Color
 	}
 
 	var (
-		length float32 = float32(math.Sqrt(float64(lenSq)))
-		nx, ny float32 = -dy / length * lineWidth * 0.5, dx / length * lineWidth * 0.5
-		p0     Point   = Point{X: a.X + nx, Y: a.Y + ny}
-		p1     Point   = Point{X: b.X + nx, Y: b.Y + ny}
-		p2     Point   = Point{X: b.X - nx, Y: b.Y - ny}
-		p3     Point   = Point{X: a.X - nx, Y: a.Y - ny}
+		length     float32    = float32(math.Sqrt(float64(lenSq)))
+		halfWidth  float32    = lineWidth * 0.5
+		radius     float32    = halfWidth
+		halfLength float32    = length * 0.5
+		tx, ty     float32    = dx / length, dy / length
+		nx, ny     float32    = -ty, tx
+		center     Point      = Point{X: (a.X + b.X) * 0.5, Y: (a.Y + b.Y) * 0.5}
+		halfSize   [2]float32 = [2]float32{halfLength + radius, radius}
+		padding    float32    = 2
+		extentX    float32    = halfSize[0] + padding
+		extentY    float32    = halfSize[1] + padding
+		locals                = [6][2]float32{
+			{-extentX, -extentY},
+			{extentX, -extentY},
+			{extentX, extentY},
+			{-extentX, -extentY},
+			{extentX, extentY},
+			{-extentX, extentY},
+		}
 	)
 
-	r.appendSolidTriangle(p0, p1, p2, color)
-	r.appendSolidTriangle(p0, p2, p3, color)
-}
-
-// appendStrokeJoin fills the outer wedge between adjacent stroked segments so curved and angled
-// paths do not show seams where segment quads meet.
-func (r *Context) appendStrokeJoin(a, b, c Point, lineWidth float32, color Color) {
-	if lineWidth <= 0 {
-		lineWidth = 1
+	start := uint32(len(r.vertices))
+	for _, local := range locals {
+		var px float32 = center.X + tx*local[0] + nx*local[1]
+		var py float32 = center.Y + ty*local[0] + ny*local[1]
+		r.appendSDFVertex(px, py, local[0], local[1], halfSize[0], halfSize[1], radius, 0, color)
 	}
 
-	var (
-		dx0, dy0 float32 = b.X - a.X, b.Y - a.Y
-		dx1, dy1 float32 = c.X - b.X, c.Y - b.Y
-		len0Sq   float32 = dx0*dx0 + dy0*dy0
-		len1Sq   float32 = dx1*dx1 + dy1*dy1
-	)
-
-	if len0Sq <= 0 || len1Sq <= 0 {
-		return
-	}
-
-	var (
-		len0      float32 = float32(math.Sqrt(float64(len0Sq)))
-		len1      float32 = float32(math.Sqrt(float64(len1Sq)))
-		halfWidth float32 = lineWidth * 0.5
-		n0x, n0y  float32 = -dy0 / len0 * halfWidth, dx0 / len0 * halfWidth
-		n1x, n1y  float32 = -dy1 / len1 * halfWidth, dx1 / len1 * halfWidth
-		cross     float32 = dx0*dy1 - dy0*dx1
-		epsilon   float32 = 0.0001
-		outer0    Point
-		outer1    Point
-	)
-
-	if cross > epsilon {
-		outer0 = Point{X: b.X + n0x, Y: b.Y + n0y}
-		outer1 = Point{X: b.X + n1x, Y: b.Y + n1y}
-	} else if cross < -epsilon {
-		outer0 = Point{X: b.X - n0x, Y: b.Y - n0y}
-		outer1 = Point{X: b.X - n1x, Y: b.Y - n1y}
-	} else {
-		return
-	}
-
-	r.appendSolidTriangle(b, outer0, outer1, color)
+	r.appendBatch(nil, r.activeTextureGroup(), nil, start, 6)
 }
 
 // appendSolidTriangle appends a triangle that uses the normal solid/SDF branch with radius zero.
@@ -1325,13 +1277,20 @@ func (r *Context) appendSolidTriangle(a, b, c Point, color Color) {
 
 // appendSolidVertex appends one vertex for simple solid geometry.
 func (r *Context) appendSolidVertex(x, y float32, color Color) {
+	r.appendSDFVertex(x, y, 0, 0, 1, 1, 0, 0, color)
+}
+
+// appendSDFVertex appends one vertex for distance-field evaluated geometry.
+func (r *Context) appendSDFVertex(x, y, localX, localY, halfWidth, halfHeight, radius, strokeWidth float32, color Color) {
 	var clipX, clipY float32 = r.pixelToClip(x, y)
 	r.vertices = append(r.vertices, vertex{
-		Position: [2]float32{clipX, clipY},
-		Local:    [2]float32{0, 0},
-		HalfSize: [2]float32{1, 1},
-		Color:    [4]float32{color.R, color.G, color.B, color.A},
-		Kind:     ctxKindRoundedRect,
+		Position:    [2]float32{clipX, clipY},
+		Local:       [2]float32{localX, localY},
+		HalfSize:    [2]float32{halfWidth, halfHeight},
+		Color:       [4]float32{color.R, color.G, color.B, color.A},
+		Radius:      radius,
+		Kind:        ctxKindRoundedRect,
+		StrokeWidth: strokeWidth,
 	})
 }
 
