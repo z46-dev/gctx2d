@@ -730,6 +730,46 @@ func (r *Context) Ellipse(cx, cy, radiusX, radiusY, rotation, startAngle, endAng
 	r.arcPointsToPath(r.ellipsePoints(cx, cy, radiusX, radiusY, rotation, startAngle, endAngle, counterClockwise), true)
 }
 
+// QuadraticCurveTo appends a quadratic Bezier curve to the current canvas-style path.
+func (r *Context) QuadraticCurveTo(cpx, cpy, x, y float32) {
+	var (
+		control Point = r.transformPoint(cpx, cpy)
+		end     Point = r.transformPoint(x, y)
+		start   Point
+		ok      bool
+	)
+
+	if start, ok = r.currentPathPoint(); !ok {
+		r.MoveTo(cpx, cpy)
+		start = control
+	}
+
+	r.curvePointsToPath(r.quadraticCurvePoints(start, control, end))
+}
+
+// BezierCurveTo appends a cubic Bezier curve to the current canvas-style path.
+func (r *Context) BezierCurveTo(cp1x, cp1y, cp2x, cp2y, x, y float32) {
+	var (
+		control1 Point = r.transformPoint(cp1x, cp1y)
+		control2 Point = r.transformPoint(cp2x, cp2y)
+		end      Point = r.transformPoint(x, y)
+		start    Point
+		ok       bool
+	)
+
+	if start, ok = r.currentPathPoint(); !ok {
+		r.MoveTo(cp1x, cp1y)
+		start = control1
+	}
+
+	r.curvePointsToPath(r.cubicCurvePoints(start, control1, control2, end))
+}
+
+// CubicCurveTo is a compatibility alias for BezierCurveTo.
+func (r *Context) CubicCurveTo(cp1x, cp1y, cp2x, cp2y, x, y float32) {
+	r.BezierCurveTo(cp1x, cp1y, cp2x, cp2y, x, y)
+}
+
 // Fill fills all current canvas-style subpaths with the current fill style. The current tessellator is a simple fan,
 // so it is intended for convex subpaths.
 func (r *Context) Fill() {
@@ -1429,6 +1469,21 @@ func (r *Context) lastPathCommandKind() pathCommandKind {
 	return r.path[len(r.path)-1].kind
 }
 
+// currentPathPoint returns the latest point in the current subpath, if one exists.
+func (r *Context) currentPathPoint() (Point, bool) {
+	for i := len(r.path) - 1; i >= 0; i-- {
+		cmd := r.path[i]
+		switch cmd.kind {
+		case pathCommandMoveTo, pathCommandLineTo:
+			return cmd.p, true
+		case pathCommandClose:
+			return Point{}, false
+		}
+	}
+
+	return Point{}, false
+}
+
 // arcPointsToPath appends a point approximation to the current path.
 func (r *Context) arcPointsToPath(points []Point, connect bool) {
 	if len(points) == 0 {
@@ -1443,6 +1498,20 @@ func (r *Context) arcPointsToPath(points []Point, connect bool) {
 
 	for i := 1; i < len(points); i++ {
 		r.LineTo(points[i].X, points[i].Y)
+	}
+}
+
+// curvePointsToPath appends a flattened Bezier approximation, skipping the already-present start point.
+func (r *Context) curvePointsToPath(points []Point) {
+	if len(points) < 2 {
+		return
+	}
+
+	for i := 1; i < len(points); i++ {
+		r.path = append(r.path, pathCommand{
+			kind: pathCommandLineTo,
+			p:    points[i],
+		})
 	}
 }
 
@@ -1511,6 +1580,60 @@ func (r *Context) ellipsePoints(cx, cy, radiusX, radiusY, rotation, startAngle, 
 	}
 
 	return
+}
+
+// quadraticCurvePoints returns a polyline approximation for a quadratic Bezier curve.
+func (r *Context) quadraticCurvePoints(p0, p1, p2 Point) (points []Point) {
+	steps := curveSubdivisionSteps([]Point{p0, p1, p2})
+	points = make([]Point, 0, steps+1)
+
+	for i := 0; i <= steps; i++ {
+		t := float32(i) / float32(steps)
+		mt := 1 - t
+		points = append(points, Point{
+			X: mt*mt*p0.X + 2*mt*t*p1.X + t*t*p2.X,
+			Y: mt*mt*p0.Y + 2*mt*t*p1.Y + t*t*p2.Y,
+		})
+	}
+
+	return
+}
+
+// cubicCurvePoints returns a polyline approximation for a cubic Bezier curve.
+func (r *Context) cubicCurvePoints(p0, p1, p2, p3 Point) (points []Point) {
+	steps := curveSubdivisionSteps([]Point{p0, p1, p2, p3})
+	points = make([]Point, 0, steps+1)
+
+	for i := 0; i <= steps; i++ {
+		t := float32(i) / float32(steps)
+		mt := 1 - t
+		points = append(points, Point{
+			X: mt*mt*mt*p0.X + 3*mt*mt*t*p1.X + 3*mt*t*t*p2.X + t*t*t*p3.X,
+			Y: mt*mt*mt*p0.Y + 3*mt*mt*t*p1.Y + 3*mt*t*t*p2.Y + t*t*t*p3.Y,
+		})
+	}
+
+	return
+}
+
+func curveSubdivisionSteps(points []Point) int {
+	var length float32
+	for i := 1; i < len(points); i++ {
+		dx := points[i].X - points[i-1].X
+		dy := points[i].Y - points[i-1].Y
+		length += float32(math.Sqrt(float64(dx*dx + dy*dy)))
+	}
+
+	steps := int(length/8) + 1
+	if steps < 12 {
+		return 12
+	}
+
+	if steps > 192 {
+		return 192
+	}
+
+	return steps
 }
 
 // transformPoint applies the current canvas-style transform to a point.
