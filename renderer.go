@@ -23,6 +23,18 @@ const (
 )
 
 const (
+	LineCapButt LineCap = iota
+	LineCapRound
+	LineCapSquare
+)
+
+const (
+	LineJoinMiter LineJoin = iota
+	LineJoinRound
+	LineJoinBevel
+)
+
+const (
 	pathCommandMoveTo pathCommandKind = iota
 	pathCommandLineTo
 	pathCommandClose
@@ -55,6 +67,9 @@ func NewContext(device *wgpu.Device, targetFormat gputypes.TextureFormat) (rende
 		fillStyle:    ColorWhite,
 		strokeStyle:  ColorWhite,
 		lineWidth:    1,
+		lineCap:      LineCapButt,
+		lineJoin:     LineJoinMiter,
+		miterLimit:   10,
 		globalAlpha:  1,
 		shadowColor:  ColorTransparent,
 		transform:    uiIdentityMatrix(),
@@ -445,6 +460,35 @@ func (r *Context) SetLineWidth(width float32) {
 	r.lineWidth = width
 }
 
+// SetLineCap sets the line cap style used by Stroke and StrokeText-like geometry.
+func (r *Context) SetLineCap(cap LineCap) {
+	switch cap {
+	case LineCapButt, LineCapRound, LineCapSquare:
+		r.lineCap = cap
+	default:
+		r.lineCap = LineCapButt
+	}
+}
+
+// SetLineJoin sets the line join style used by Stroke.
+func (r *Context) SetLineJoin(join LineJoin) {
+	switch join {
+	case LineJoinMiter, LineJoinRound, LineJoinBevel:
+		r.lineJoin = join
+	default:
+		r.lineJoin = LineJoinMiter
+	}
+}
+
+// SetMiterLimit sets the maximum allowed miter length ratio before falling back to a bevel join.
+func (r *Context) SetMiterLimit(limit float32) {
+	if limit < 1 {
+		limit = 1
+	}
+
+	r.miterLimit = limit
+}
+
 // SetGlobalAlpha sets the alpha multiplier applied to subsequent draw calls.
 func (r *Context) SetGlobalAlpha(alpha float32) {
 	if alpha < 0 {
@@ -520,6 +564,9 @@ func (r *Context) drawingState() drawingState {
 		fillStyle:          r.fillStyle,
 		strokeStyle:        r.strokeStyle,
 		lineWidth:          r.lineWidth,
+		lineCap:            r.lineCap,
+		lineJoin:           r.lineJoin,
+		miterLimit:         r.miterLimit,
 		globalAlpha:        r.globalAlpha,
 		shadowColor:        r.shadowColor,
 		shadowBlur:         r.shadowBlur,
@@ -537,6 +584,9 @@ func (r *Context) restoreDrawingState(state drawingState) {
 	r.fillStyle = state.fillStyle
 	r.strokeStyle = state.strokeStyle
 	r.lineWidth = state.lineWidth
+	r.lineCap = state.lineCap
+	r.lineJoin = state.lineJoin
+	r.miterLimit = state.miterLimit
 	r.globalAlpha = state.globalAlpha
 	r.shadowColor = state.shadowColor
 	r.shadowBlur = state.shadowBlur
@@ -1320,61 +1370,162 @@ func (r *Context) appendStrokePath(points []Point, closed bool, lineWidth float3
 		return
 	}
 
-	for i := 0; i < len(points)-1; i++ {
-		r.appendStrokeSegment(points[i], points[i+1], lineWidth, color)
-	}
-
-	if closed {
-		r.appendStrokeSegment(points[len(points)-1], points[0], lineWidth, color)
-	}
-}
-
-// appendStrokeSegment appends one stroked line segment as an SDF capsule so the fragment shader
-// can anti-alias the contour instead of relying on hard triangle edges.
-func (r *Context) appendStrokeSegment(a, b Point, lineWidth float32, color Color) {
 	if lineWidth <= 0 {
 		lineWidth = 1
 	}
 
-	var (
-		dx, dy float32 = b.X - a.X, b.Y - a.Y
-		lenSq  float32 = dx*dx + dy*dy
-	)
+	halfWidth := lineWidth * 0.5
+	segmentCount := len(points) - 1
+	if closed {
+		segmentCount = len(points)
+	}
 
-	if lenSq <= 0 {
+	segments := make([]strokeSegment, 0, segmentCount)
+	for i := 0; i < segmentCount; i++ {
+		a := points[i]
+		b := points[(i+1)%len(points)]
+		dx, dy := b.X-a.X, b.Y-a.Y
+		lenSq := dx*dx + dy*dy
+		if lenSq <= 0 {
+			continue
+		}
+
+		length := float32(math.Sqrt(float64(lenSq)))
+		tx, ty := dx/length, dy/length
+		segments = append(segments, strokeSegment{
+			a:      a,
+			b:      b,
+			tx:     tx,
+			ty:     ty,
+			nx:     -ty,
+			ny:     tx,
+			length: length,
+		})
+	}
+
+	if len(segments) == 0 {
 		return
 	}
 
-	var (
-		length     float32    = float32(math.Sqrt(float64(lenSq)))
-		halfWidth  float32    = lineWidth * 0.5
-		radius     float32    = halfWidth
-		halfLength float32    = length * 0.5
-		tx, ty     float32    = dx / length, dy / length
-		nx, ny     float32    = -ty, tx
-		center     Point      = Point{X: (a.X + b.X) * 0.5, Y: (a.Y + b.Y) * 0.5}
-		halfSize   [2]float32 = [2]float32{halfLength + radius, radius}
-		padding    float32    = 2 + quadShadowPadding(r.shadowBlur)
-		extentX    float32    = halfSize[0] + padding
-		extentY    float32    = halfSize[1] + padding
-		locals                = [6][2]float32{
-			{-extentX, -extentY},
-			{extentX, -extentY},
-			{extentX, extentY},
-			{-extentX, -extentY},
-			{extentX, extentY},
-			{-extentX, extentY},
+	for i, seg := range segments {
+		startExtend := float32(0)
+		endExtend := float32(0)
+		if !closed && r.lineCap == LineCapSquare {
+			if i == 0 {
+				startExtend = halfWidth
+			}
+			if i == len(segments)-1 {
+				endExtend = halfWidth
+			}
 		}
-	)
 
-	start := uint32(len(r.vertices))
-	for _, local := range locals {
-		var px float32 = center.X + tx*local[0] + nx*local[1]
-		var py float32 = center.Y + ty*local[0] + ny*local[1]
-		r.appendSDFVertex(px, py, local[0], local[1], halfSize[0], halfSize[1], radius, 0, color)
+		r.appendStrokeBody(seg, lineWidth, color, startExtend, endExtend)
 	}
 
-	r.appendBatch(nil, r.activeTextureGroup(), nil, start, 6)
+	if closed {
+		for i := 0; i < len(segments); i++ {
+			prev := segments[(i-1+len(segments))%len(segments)]
+			curr := segments[i]
+			r.appendStrokeJoin(points[i], prev, curr, halfWidth, color)
+		}
+		return
+	}
+
+	if r.lineCap == LineCapRound {
+		r.appendStrokeCapCircle(points[0], halfWidth, color)
+		r.appendStrokeCapCircle(points[len(points)-1], halfWidth, color)
+	}
+
+	for i := 1; i < len(segments); i++ {
+		r.appendStrokeJoin(points[i], segments[i-1], segments[i], halfWidth, color)
+	}
+}
+
+func (r *Context) appendStrokeBody(seg strokeSegment, lineWidth float32, color Color, startExtend, endExtend float32) {
+	halfWidth := lineWidth * 0.5
+	halfLength := seg.length*0.5 + (startExtend+endExtend)*0.5
+	centerShift := (endExtend - startExtend) * 0.5
+	center := Point{
+		X: (seg.a.X+seg.b.X)*0.5 + seg.tx*centerShift,
+		Y: (seg.a.Y+seg.b.Y)*0.5 + seg.ty*centerShift,
+	}
+
+	r.appendOrientedSDFQuad(center, seg.tx, seg.ty, seg.nx, seg.ny, halfLength, halfWidth, 0, 0, color)
+}
+
+func (r *Context) appendStrokeCapCircle(center Point, radius float32, color Color) {
+	if radius <= 0 {
+		return
+	}
+
+	r.appendAxisAlignedSDFQuad(center, radius, radius, radius, 0, color)
+}
+
+func (r *Context) appendStrokeJoin(vertex Point, prev, next strokeSegment, halfWidth float32, color Color) {
+	if halfWidth <= 0 {
+		return
+	}
+
+	cross := prev.tx*next.ty - prev.ty*next.tx
+	if math.Abs(float64(cross)) < 1e-4 {
+		return
+	}
+
+	if r.lineJoin == LineJoinRound {
+		r.appendStrokeCapCircle(vertex, halfWidth, color)
+		return
+	}
+
+	outwardSign := float32(1)
+	if cross < 0 {
+		outwardSign = -1
+	}
+
+	outerPrev := Point{
+		X: vertex.X + prev.nx*halfWidth*outwardSign,
+		Y: vertex.Y + prev.ny*halfWidth*outwardSign,
+	}
+	outerNext := Point{
+		X: vertex.X + next.nx*halfWidth*outwardSign,
+		Y: vertex.Y + next.ny*halfWidth*outwardSign,
+	}
+
+	if r.lineJoin == LineJoinBevel {
+		r.appendSolidTriangle(vertex, outerPrev, outerNext, color)
+		return
+	}
+
+	miterPoint, ok := lineIntersection(
+		outerPrev, Point{X: outerPrev.X - prev.tx, Y: outerPrev.Y - prev.ty},
+		outerNext, Point{X: outerNext.X + next.tx, Y: outerNext.Y + next.ty},
+	)
+	if !ok {
+		r.appendSolidTriangle(vertex, outerPrev, outerNext, color)
+		return
+	}
+
+	miterDX, miterDY := miterPoint.X-vertex.X, miterPoint.Y-vertex.Y
+	miterLength := float32(math.Sqrt(float64(miterDX*miterDX + miterDY*miterDY)))
+	if miterLength > r.miterLimit*halfWidth {
+		r.appendSolidTriangle(vertex, outerPrev, outerNext, color)
+		return
+	}
+
+	r.appendSolidTriangle(vertex, outerPrev, miterPoint, color)
+	r.appendSolidTriangle(vertex, miterPoint, outerNext, color)
+}
+
+func lineIntersection(a0, a1, b0, b1 Point) (Point, bool) {
+	adx, ady := a1.X-a0.X, a1.Y-a0.Y
+	bdx, bdy := b1.X-b0.X, b1.Y-b0.Y
+	denom := adx*bdy - ady*bdx
+	if math.Abs(float64(denom)) < 1e-6 {
+		return Point{}, false
+	}
+
+	dx, dy := b0.X-a0.X, b0.Y-a0.Y
+	t := (dx*bdy - dy*bdx) / denom
+	return Point{X: a0.X + adx*t, Y: a0.Y + ady*t}, true
 }
 
 // appendSolidTriangle appends a triangle that uses the normal solid/SDF branch with radius zero.
@@ -1401,6 +1552,37 @@ func (r *Context) appendSolidVertex(x, y float32, color Color) {
 
 func (r *Context) appendSolidVertexNoShadow(x, y float32, color Color) {
 	r.appendSDFVertexWithShadow(x, y, 0, 0, 1, 1, 0, 0, color, ColorTransparent, 0)
+}
+
+func (r *Context) appendAxisAlignedSDFQuad(center Point, halfWidth, halfHeight, radius, strokeWidth float32, color Color) {
+	r.appendOrientedSDFQuad(center, 1, 0, 0, 1, halfWidth, halfHeight, radius, strokeWidth, color)
+}
+
+func (r *Context) appendOrientedSDFQuad(center Point, tx, ty, nx, ny, halfWidth, halfHeight, radius, strokeWidth float32, color Color) {
+	padding := float32(2)
+	if r.hasShadow() {
+		padding += quadShadowPadding(r.shadowBlur)
+	}
+
+	extentX := halfWidth + padding
+	extentY := halfHeight + padding
+	locals := [6][2]float32{
+		{-extentX, -extentY},
+		{extentX, -extentY},
+		{extentX, extentY},
+		{-extentX, -extentY},
+		{extentX, extentY},
+		{-extentX, extentY},
+	}
+
+	start := uint32(len(r.vertices))
+	for _, local := range locals {
+		px := center.X + tx*local[0] + nx*local[1]
+		py := center.Y + ty*local[0] + ny*local[1]
+		r.appendSDFVertex(px, py, local[0], local[1], halfWidth, halfHeight, radius, strokeWidth, color)
+	}
+
+	r.appendBatch(nil, r.activeTextureGroup(), nil, start, 6)
 }
 
 // appendSDFVertex appends one vertex for distance-field evaluated geometry.

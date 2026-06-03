@@ -11,6 +11,8 @@ type (
 	FontWeight   int
 	TextAlign    int
 	TextBaseline int
+	LineCap      int
+	LineJoin     int
 
 	Color struct {
 		R float32
@@ -37,6 +39,9 @@ type (
 		fillStyle          Color
 		strokeStyle        Color
 		lineWidth          float32
+		lineCap            LineCap
+		lineJoin           LineJoin
+		miterLimit         float32
 		globalAlpha        float32
 		shadowColor        Color
 		shadowBlur         float32
@@ -117,6 +122,16 @@ type (
 		closed bool
 	}
 
+	strokeSegment struct {
+		a      Point
+		b      Point
+		tx     float32
+		ty     float32
+		nx     float32
+		ny     float32
+		length float32
+	}
+
 	batch struct {
 		pipeline *wgpu.RenderPipeline
 		group    *wgpu.BindGroup
@@ -180,6 +195,9 @@ type (
 		fillStyle          Color
 		strokeStyle        Color
 		lineWidth          float32
+		lineCap            LineCap
+		lineJoin           LineJoin
+		miterLimit         float32
 		globalAlpha        float32
 		shadowColor        Color
 		shadowBlur         float32
