@@ -63,18 +63,31 @@ fn rounded_rect_sdf(p: vec2<f32>, half_size: vec2<f32>, radius: f32) -> f32 {
     return length(max(q, vec2<f32>(0.0, 0.0))) + min(max(q.x, q.y), 0.0) - r;
 }
 
-fn gaussian_shadow(distance: f32, blur: f32, aa: f32) -> f32 {
+fn erf_approx(x: f32) -> f32 {
+    let sign = select(-1.0, 1.0, x >= 0.0);
+    let ax = abs(x);
+    let t = 1.0 / (1.0 + 0.3275911 * ax);
+    let a1 = 0.254829592;
+    let a2 = -0.284496736;
+    let a3 = 1.421413741;
+    let a4 = -1.453152027;
+    let a5 = 1.061405429;
+    let poly = (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t;
+    return sign * (1.0 - poly * exp(-ax * ax));
+}
+
+fn gaussian_blurred_coverage(distance: f32, blur: f32, aa: f32) -> f32 {
     if (blur <= 0.0) {
         return 0.0;
     }
 
-    let outside = max(distance, 0.0);
-    let sigma = max(blur * 0.5, 0.75);
-    let normalized = outside / sigma;
-    let gaussian = exp(-0.5 * normalized * normalized);
-    let extent = max(blur * 2.5, 1.0);
-    let cutoff = 1.0 - smoothstep(blur + aa, extent + aa, outside);
-    return gaussian * cutoff;
+    // Canvas-style shadow blur behaves like a soft Gaussian blur on the source alpha mask,
+    // not like an outline width. Treat the incoming blur as the blur radius and derive a sigma
+    // from it, then evaluate the Gaussian CDF against the signed distance field.
+    let sigma = max(blur * 0.5, 0.5);
+    let softened_distance = distance - aa * 0.5;
+    let normalized = softened_distance / (sigma * 1.41421356237);
+    return clamp(0.5 - 0.5 * erf_approx(normalized), 0.0, 1.0);
 }
 
 fn compose_over(dst: vec4<f32>, src: vec4<f32>) -> vec4<f32> {
@@ -152,7 +165,8 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
 
         var out_color = vec4<f32>(0.0, 0.0, 0.0, 0.0);
         if (input.shadow_blur > 0.0 && input.shadow_color.a > 0.0) {
-            let shadow_coverage = gaussian_shadow(shadow_distance, input.shadow_blur, aa) * (1.0 - coverage);
+            let blurred = gaussian_blurred_coverage(shadow_distance, input.shadow_blur, aa);
+            let shadow_coverage = max(blurred - coverage, 0.0);
             out_color = vec4<f32>(input.shadow_color.rgb, input.shadow_color.a * shadow_coverage);
         }
 
@@ -165,7 +179,9 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
     let sample = textureSample(ui_atlas, ui_sampler, clamp(uv, input.uv_min, input.uv_max));
     var shadow = vec4<f32>(0.0, 0.0, 0.0, 0.0);
     if (input.shadow_blur > 0.0 && input.shadow_color.a > 0.0) {
-        shadow = vec4<f32>(input.shadow_color.rgb, input.shadow_color.a * sample_shadow_alpha(input));
+        let blurred_alpha = sample_shadow_alpha(input);
+        let visible_shadow = max(blurred_alpha - sample.a * inside, 0.0);
+        shadow = vec4<f32>(input.shadow_color.rgb, input.shadow_color.a * visible_shadow);
     }
 
     if (input.kind < 1.5) {
