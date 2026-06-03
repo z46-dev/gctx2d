@@ -19,6 +19,13 @@ ctx.SetFillStyle(gctx2d.ColorWhite)
 ctx.Rect(0, 0, 512, 512)
 ctx.Fill()
 
+ctx.SetShadowColor(gctx2d.Color{A: 0.35})
+ctx.SetShadowBlur(12)
+ctx.SetGlobalAlpha(0.9)
+ctx.SetFillStyle(gctx2d.ColorBlack)
+ctx.Circle(256, 256, 64)
+ctx.Fill()
+
 if err := canvas.Flush(nil); err != nil {
 	return err
 }

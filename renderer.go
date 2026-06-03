@@ -55,6 +55,8 @@ func NewContext(device *wgpu.Device, targetFormat gputypes.TextureFormat) (rende
 		fillStyle:    ColorWhite,
 		strokeStyle:  ColorWhite,
 		lineWidth:    1,
+		globalAlpha:  1,
+		shadowColor:  ColorTransparent,
 		transform:    uiIdentityMatrix(),
 		imageEffect:  ImageEffectNone,
 		stateStack:   make([]drawingState, 0, 32),
@@ -375,11 +377,15 @@ func (r *Context) createPipeline(targetFormat gputypes.TextureFormat) (err error
 						{ShaderLocation: 1, Offset: 8, Format: gputypes.VertexFormatFloat32x2},
 						{ShaderLocation: 2, Offset: 16, Format: gputypes.VertexFormatFloat32x2},
 						{ShaderLocation: 3, Offset: 24, Format: gputypes.VertexFormatFloat32x2},
-						{ShaderLocation: 4, Offset: 32, Format: gputypes.VertexFormatFloat32x4},
-						{ShaderLocation: 5, Offset: 48, Format: gputypes.VertexFormatFloat32},
-						{ShaderLocation: 6, Offset: 52, Format: gputypes.VertexFormatFloat32},
-						{ShaderLocation: 7, Offset: 56, Format: gputypes.VertexFormatFloat32},
-						{ShaderLocation: 8, Offset: 60, Format: gputypes.VertexFormatFloat32},
+						{ShaderLocation: 4, Offset: 32, Format: gputypes.VertexFormatFloat32x2},
+						{ShaderLocation: 5, Offset: 40, Format: gputypes.VertexFormatFloat32x2},
+						{ShaderLocation: 6, Offset: 48, Format: gputypes.VertexFormatFloat32x4},
+						{ShaderLocation: 7, Offset: 64, Format: gputypes.VertexFormatFloat32x4},
+						{ShaderLocation: 8, Offset: 80, Format: gputypes.VertexFormatFloat32},
+						{ShaderLocation: 9, Offset: 84, Format: gputypes.VertexFormatFloat32},
+						{ShaderLocation: 10, Offset: 88, Format: gputypes.VertexFormatFloat32},
+						{ShaderLocation: 11, Offset: 92, Format: gputypes.VertexFormatFloat32},
+						{ShaderLocation: 12, Offset: 96, Format: gputypes.VertexFormatFloat32},
 					},
 				},
 			},
@@ -439,6 +445,31 @@ func (r *Context) SetLineWidth(width float32) {
 	r.lineWidth = width
 }
 
+// SetGlobalAlpha sets the alpha multiplier applied to subsequent draw calls.
+func (r *Context) SetGlobalAlpha(alpha float32) {
+	if alpha < 0 {
+		alpha = 0
+	} else if alpha > 1 {
+		alpha = 1
+	}
+
+	r.globalAlpha = alpha
+}
+
+// SetShadowColor sets the color used by subsequent shadow blur passes.
+func (r *Context) SetShadowColor(color Color) {
+	r.shadowColor = color
+}
+
+// SetShadowBlur sets the blur radius used by subsequent shadow passes.
+func (r *Context) SetShadowBlur(blur float32) {
+	if blur < 0 {
+		blur = 0
+	}
+
+	r.shadowBlur = blur
+}
+
 // SetTextAlign sets the horizontal anchor used by FillText and StrokeText.
 func (r *Context) SetTextAlign(align TextAlign) {
 	switch align {
@@ -489,6 +520,9 @@ func (r *Context) drawingState() drawingState {
 		fillStyle:          r.fillStyle,
 		strokeStyle:        r.strokeStyle,
 		lineWidth:          r.lineWidth,
+		globalAlpha:        r.globalAlpha,
+		shadowColor:        r.shadowColor,
+		shadowBlur:         r.shadowBlur,
 		textAlign:          r.textAlign,
 		textBaseline:       r.textBaseline,
 		transform:          r.transform,
@@ -503,6 +537,9 @@ func (r *Context) restoreDrawingState(state drawingState) {
 	r.fillStyle = state.fillStyle
 	r.strokeStyle = state.strokeStyle
 	r.lineWidth = state.lineWidth
+	r.globalAlpha = state.globalAlpha
+	r.shadowColor = state.shadowColor
+	r.shadowBlur = state.shadowBlur
 	r.textAlign = state.textAlign
 	r.textBaseline = state.textBaseline
 	r.transform = state.transform
@@ -773,14 +810,20 @@ func (r *Context) CubicCurveTo(cp1x, cp1y, cp2x, cp2y, x, y float32) {
 // Fill fills all current canvas-style subpaths with the current fill style. The current tessellator is a simple fan,
 // so it is intended for convex subpaths.
 func (r *Context) Fill() {
-	for _, subpath := range r.flattenPath() {
+	subpaths := r.flattenPath()
+	if r.hasShadow() {
+		r.appendPathShadow(subpaths)
+	}
+
+	for _, subpath := range subpaths {
 		r.appendFilledPolygon(subpath.points, r.fillStyle)
 	}
 }
 
 // Stroke strokes all current canvas-style subpaths with the current stroke style and line width.
 func (r *Context) Stroke() {
-	for _, subpath := range r.flattenPath() {
+	subpaths := r.flattenPath()
+	for _, subpath := range subpaths {
 		r.appendStrokePath(subpath.points, subpath.closed, r.lineWidth, r.strokeStyle)
 	}
 }
@@ -846,11 +889,16 @@ func (r *Context) appendImageClipBounds(img *gimage.Image, transform Matrix, x, 
 		uniform = r.currentImageShader.imageUniformBindGroup()
 	}
 
+	shadowBlur := r.effectiveShadowBlurForQuads()
+	padding := quadShadowPadding(shadowBlur)
+	paddedX, paddedY := x-padding, y-padding
+	paddedWidth, paddedHeight := width+padding*2, height+padding*2
+
 	var (
-		p0 Point = transform.Apply(x, y)
-		p1 Point = transform.Apply(x+width, y)
-		p2 Point = transform.Apply(x+width, y+height)
-		p3 Point = transform.Apply(x, y+height)
+		p0 Point = transform.Apply(paddedX, paddedY)
+		p1 Point = transform.Apply(paddedX+paddedWidth, paddedY)
+		p2 Point = transform.Apply(paddedX+paddedWidth, paddedY+paddedHeight)
+		p3 Point = transform.Apply(paddedX, paddedY+paddedHeight)
 
 		u0 float32 = x1 / float32(img.Width)
 		v0 float32 = y1 / float32(img.Height)
@@ -866,32 +914,34 @@ func (r *Context) appendImageClipBounds(img *gimage.Image, transform Matrix, x, 
 			{1, 1},
 			{-1, 1},
 		}
-		uvs [6][2]float32 = [6][2]float32{
-			{u0, v0},
-			{u1, v0},
-			{u1, v1},
-			{u0, v0},
-			{u1, v1},
-			{u0, v1},
-		}
-		start uint32  = uint32(len(r.vertices))
-		kind  float32 = ctxKindImage + float32(r.imageEffect)
+		start       uint32  = uint32(len(r.vertices))
+		kind        float32 = ctxKindImage + float32(r.imageEffect)
+		color       Color   = r.applyGlobalAlpha(ColorWhite)
+		shadowColor Color   = r.effectiveShadowColorForQuads()
 	)
 
 	if r.currentImageShader != nil {
+		shadowBlur = 0
+		shadowColor = ColorTransparent
 		kind = ctxKindImage
 	}
 
 	for i := range 6 {
 		clipX, clipY := r.pixelToClip(positions[i].X, positions[i].Y)
 		r.vertices = append(r.vertices, vertex{
-			Position:   [2]float32{clipX, clipY},
-			Local:      locals[i],
-			HalfSize:   [2]float32{1, 1},
-			UV:         uvs[i],
-			Color:      [4]float32{1, 1, 1, 1},
-			Kind:       kind,
-			EffectTime: r.effectTime,
+			Position:    [2]float32{clipX, clipY},
+			Local:       [2]float32{locals[i][0] * paddedWidth * 0.5, locals[i][1] * paddedHeight * 0.5},
+			HalfSize:    [2]float32{width * 0.5, height * 0.5},
+			UV:          [2]float32{u0, v0},
+			UVMin:       [2]float32{u0, v0},
+			UVMax:       [2]float32{u1, v1},
+			Color:       [4]float32{color.R, color.G, color.B, color.A},
+			ShadowColor: [4]float32{shadowColor.R, shadowColor.G, shadowColor.B, shadowColor.A},
+			Radius:      0,
+			Kind:        kind,
+			StrokeWidth: 0,
+			EffectTime:  r.effectTime,
+			ShadowBlur:  shadowBlur,
 		})
 	}
 
@@ -913,6 +963,14 @@ func (r *Context) StrokeText(s string, x, y float32) {
 		return
 	}
 
+	r.appendStrokeTextRun(s, x, y, r.strokeStyle)
+}
+
+func (r *Context) appendStrokeTextRun(s string, x, y float32, color Color) {
+	if r == nil || len(s) == 0 || r.currentFont == nil || r.lineWidth <= 0 {
+		return
+	}
+
 	var radius float32 = float32(math.Ceil(float64(r.lineWidth)))
 	if radius < 1 {
 		radius = 1
@@ -930,7 +988,7 @@ func (r *Context) StrokeText(s string, x, y float32) {
 				continue
 			}
 
-			r.appendTextRun(s, x+dx, y+dy, r.strokeStyle)
+			r.appendTextRun(s, x+dx, y+dy, color)
 		}
 	}
 }
@@ -1243,6 +1301,19 @@ func (r *Context) appendFilledPolygon(points []Point, color Color) {
 	}
 }
 
+func (r *Context) appendFilledPolygonOffset(points []Point, offset Point, color Color) {
+	if len(points) < 3 {
+		return
+	}
+
+	origin := Point{X: points[0].X + offset.X, Y: points[0].Y + offset.Y}
+	for i := 1; i < len(points)-1; i++ {
+		a := Point{X: points[i].X + offset.X, Y: points[i].Y + offset.Y}
+		b := Point{X: points[i+1].X + offset.X, Y: points[i+1].Y + offset.Y}
+		r.appendSolidTriangleNoShadow(origin, a, b, color)
+	}
+}
+
 // appendStrokePath appends a simple stroked polyline/polygon.
 func (r *Context) appendStrokePath(points []Point, closed bool, lineWidth float32, color Color) {
 	if len(points) < 2 {
@@ -1283,7 +1354,7 @@ func (r *Context) appendStrokeSegment(a, b Point, lineWidth float32, color Color
 		nx, ny     float32    = -ty, tx
 		center     Point      = Point{X: (a.X + b.X) * 0.5, Y: (a.Y + b.Y) * 0.5}
 		halfSize   [2]float32 = [2]float32{halfLength + radius, radius}
-		padding    float32    = 2
+		padding    float32    = 2 + quadShadowPadding(r.shadowBlur)
 		extentX    float32    = halfSize[0] + padding
 		extentY    float32    = halfSize[1] + padding
 		locals                = [6][2]float32{
@@ -1315,27 +1386,55 @@ func (r *Context) appendSolidTriangle(a, b, c Point, color Color) {
 	r.appendBatch(nil, r.activeTextureGroup(), nil, start, 3)
 }
 
+func (r *Context) appendSolidTriangleNoShadow(a, b, c Point, color Color) {
+	start := uint32(len(r.vertices))
+	r.appendSolidVertexNoShadow(a.X, a.Y, color)
+	r.appendSolidVertexNoShadow(b.X, b.Y, color)
+	r.appendSolidVertexNoShadow(c.X, c.Y, color)
+	r.appendBatch(nil, r.activeTextureGroup(), nil, start, 3)
+}
+
 // appendSolidVertex appends one vertex for simple solid geometry.
 func (r *Context) appendSolidVertex(x, y float32, color Color) {
 	r.appendSDFVertex(x, y, 0, 0, 1, 1, 0, 0, color)
 }
 
+func (r *Context) appendSolidVertexNoShadow(x, y float32, color Color) {
+	r.appendSDFVertexWithShadow(x, y, 0, 0, 1, 1, 0, 0, color, ColorTransparent, 0)
+}
+
 // appendSDFVertex appends one vertex for distance-field evaluated geometry.
 func (r *Context) appendSDFVertex(x, y, localX, localY, halfWidth, halfHeight, radius, strokeWidth float32, color Color) {
+	r.appendSDFVertexWithShadow(x, y, localX, localY, halfWidth, halfHeight, radius, strokeWidth, color, r.effectiveShadowColor(), r.shadowBlur)
+}
+
+func (r *Context) appendSDFVertexWithShadow(x, y, localX, localY, halfWidth, halfHeight, radius, strokeWidth float32, color, shadowColor Color, shadowBlur float32) {
+	color = r.applyGlobalAlpha(color)
 	var clipX, clipY float32 = r.pixelToClip(x, y)
 	r.vertices = append(r.vertices, vertex{
 		Position:    [2]float32{clipX, clipY},
 		Local:       [2]float32{localX, localY},
 		HalfSize:    [2]float32{halfWidth, halfHeight},
 		Color:       [4]float32{color.R, color.G, color.B, color.A},
+		ShadowColor: [4]float32{shadowColor.R, shadowColor.G, shadowColor.B, shadowColor.A},
 		Radius:      radius,
 		Kind:        ctxKindRoundedRect,
 		StrokeWidth: strokeWidth,
+		ShadowBlur:  shadowBlur,
 	})
 }
 
 // appendTextQuad adds a possibly transformed quad for a single glyph to the vertex buffer, using the glyph's atlas UVs and the specified color.
 func (r *Context) appendTextQuad(face *fontFace, p0, p1, p2, p3 Point, g glyph, color Color) {
+	shadowBlur := r.effectiveShadowBlurForQuads()
+	padding := quadShadowPadding(shadowBlur)
+	if padding > 0 {
+		p0 = Point{X: p0.X - padding, Y: p0.Y - padding}
+		p1 = Point{X: p1.X + padding, Y: p1.Y - padding}
+		p2 = Point{X: p2.X + padding, Y: p2.Y + padding}
+		p3 = Point{X: p3.X - padding, Y: p3.Y + padding}
+	}
+
 	start := uint32(len(r.vertices))
 	var positions [6]Point = [6]Point{
 		p0,
@@ -1346,26 +1445,153 @@ func (r *Context) appendTextQuad(face *fontFace, p0, p1, p2, p3 Point, g glyph, 
 		p3,
 	}
 
-	var uvs [6][2]float32 = [6][2]float32{
-		{g.U0, g.V0},
-		{g.U1, g.V0},
-		{g.U1, g.V1},
-		{g.U0, g.V0},
-		{g.U1, g.V1},
-		{g.U0, g.V1},
+	color = r.applyGlobalAlpha(color)
+	shadowColor := r.effectiveShadowColorForQuads()
+	halfWidth := g.W * 0.5
+	halfHeight := g.H * 0.5
+	paddedHalfWidth := halfWidth + padding
+	paddedHalfHeight := halfHeight + padding
+	locals := [6][2]float32{
+		{-paddedHalfWidth, -paddedHalfHeight},
+		{paddedHalfWidth, -paddedHalfHeight},
+		{paddedHalfWidth, paddedHalfHeight},
+		{-paddedHalfWidth, -paddedHalfHeight},
+		{paddedHalfWidth, paddedHalfHeight},
+		{-paddedHalfWidth, paddedHalfHeight},
 	}
 
 	for i := range 6 {
 		var clipX, clipY float32 = r.pixelToClip(positions[i].X, positions[i].Y)
 		r.vertices = append(r.vertices, vertex{
-			Position: [2]float32{clipX, clipY},
-			UV:       uvs[i],
-			Color:    [4]float32{color.R, color.G, color.B, color.A},
-			Kind:     ctxKindText,
+			Position:    [2]float32{clipX, clipY},
+			Local:       locals[i],
+			HalfSize:    [2]float32{halfWidth, halfHeight},
+			UV:          [2]float32{g.U0, g.V0},
+			UVMin:       [2]float32{g.U0, g.V0},
+			UVMax:       [2]float32{g.U1, g.V1},
+			Color:       [4]float32{color.R, color.G, color.B, color.A},
+			ShadowColor: [4]float32{shadowColor.R, shadowColor.G, shadowColor.B, shadowColor.A},
+			Kind:        ctxKindText,
+			ShadowBlur:  shadowBlur,
 		})
 	}
 
 	r.appendBatch(nil, face.group, nil, start, 6)
+}
+
+func (r *Context) hasShadow() bool {
+	return r != nil && r.shadowBlur > 0 && r.shadowColor.A > 0
+}
+
+func (r *Context) appendPathShadow(subpaths []pathSubpath) {
+	for _, sample := range shadowSamples(r.shadowBlur) {
+		color := r.shadowColor
+		color.A *= sample.weight
+		if color.A <= 0 {
+			continue
+		}
+
+		offset := Point{X: sample.dx, Y: sample.dy}
+		for _, subpath := range subpaths {
+			r.appendFilledPolygonOffset(subpath.points, offset, color)
+		}
+	}
+}
+
+func (r *Context) applyGlobalAlpha(color Color) Color {
+	color.A *= r.globalAlpha
+	return color
+}
+
+func (r *Context) effectiveShadowColor() Color {
+	if !r.hasShadow() {
+		return ColorTransparent
+	}
+
+	return r.applyGlobalAlpha(r.shadowColor)
+}
+
+func (r *Context) effectiveShadowColorForQuads() Color {
+	if r.currentImageShader != nil {
+		return ColorTransparent
+	}
+
+	return r.effectiveShadowColor()
+}
+
+func (r *Context) effectiveShadowBlurForQuads() float32 {
+	if r.currentImageShader != nil || !r.hasShadow() {
+		return 0
+	}
+
+	return r.shadowBlur
+}
+
+func quadShadowPadding(blur float32) float32 {
+	if blur <= 0 {
+		return 0
+	}
+
+	return blur*2 + 2
+}
+
+type shadowSample struct {
+	dx     float32
+	dy     float32
+	weight float32
+}
+
+func shadowSamples(blur float32) []shadowSample {
+	if blur <= 0 {
+		return nil
+	}
+
+	outerCount := int(math.Ceil(float64(blur * 1.5)))
+	if outerCount < 8 {
+		outerCount = 8
+	}
+	if outerCount > 20 {
+		outerCount = 20
+	}
+
+	innerCount := outerCount / 2
+	samples := make([]shadowSample, 0, outerCount+innerCount+1)
+	var totalWeight float32 = 1.5
+	samples = append(samples, shadowSample{weight: 1.5})
+
+	if blur > 1 {
+		innerRadius := blur * 0.55
+		for i := range innerCount {
+			angle := float64(i) * 2 * math.Pi / float64(innerCount)
+			samples = append(samples, shadowSample{
+				dx:     float32(math.Cos(angle)) * innerRadius,
+				dy:     float32(math.Sin(angle)) * innerRadius,
+				weight: 1,
+			})
+			totalWeight += 1
+		}
+	}
+
+	for i := range outerCount {
+		angle := float64(i) * 2 * math.Pi / float64(outerCount)
+		samples = append(samples, shadowSample{
+			dx:     float32(math.Cos(angle)) * blur,
+			dy:     float32(math.Sin(angle)) * blur,
+			weight: 0.8,
+		})
+		totalWeight += 0.8
+	}
+
+	if totalWeight <= 0 {
+		return nil
+	}
+
+	scale := 1 / totalWeight
+	for i := range samples {
+		samples[i].weight *= scale
+	}
+
+	return samples
 }
 
 func (r *Context) activeTextureGroup() *wgpu.BindGroup {

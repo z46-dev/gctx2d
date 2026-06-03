@@ -37,6 +37,9 @@ type (
 		fillStyle          Color
 		strokeStyle        Color
 		lineWidth          float32
+		globalAlpha        float32
+		shadowColor        Color
+		shadowBlur         float32
 		textAlign          TextAlign
 		textBaseline       TextBaseline
 		transform          Matrix
@@ -51,11 +54,15 @@ type (
 		Local       [2]float32
 		HalfSize    [2]float32
 		UV          [2]float32
+		UVMin       [2]float32
+		UVMax       [2]float32
 		Color       [4]float32
+		ShadowColor [4]float32
 		Radius      float32
 		Kind        float32
 		StrokeWidth float32
 		EffectTime  float32
+		ShadowBlur  float32
 	}
 
 	glyph struct {
@@ -173,6 +180,9 @@ type (
 		fillStyle          Color
 		strokeStyle        Color
 		lineWidth          float32
+		globalAlpha        float32
+		shadowColor        Color
+		shadowBlur         float32
 		textAlign          TextAlign
 		textBaseline       TextBaseline
 		transform          Matrix
