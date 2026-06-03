@@ -63,6 +63,20 @@ fn rounded_rect_sdf(p: vec2<f32>, half_size: vec2<f32>, radius: f32) -> f32 {
     return length(max(q, vec2<f32>(0.0, 0.0))) + min(max(q.x, q.y), 0.0) - r;
 }
 
+fn gaussian_shadow(distance: f32, blur: f32, aa: f32) -> f32 {
+    if (blur <= 0.0) {
+        return 0.0;
+    }
+
+    let outside = max(distance, 0.0);
+    let sigma = max(blur * 0.5, 0.75);
+    let normalized = outside / sigma;
+    let gaussian = exp(-0.5 * normalized * normalized);
+    let extent = max(blur * 2.5, 1.0);
+    let cutoff = 1.0 - smoothstep(blur + aa, extent + aa, outside);
+    return gaussian * cutoff;
+}
+
 fn compose_over(dst: vec4<f32>, src: vec4<f32>) -> vec4<f32> {
     let out_a = src.a + dst.a * (1.0 - src.a);
     if (out_a <= 0.0001) {
@@ -138,7 +152,7 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
 
         var out_color = vec4<f32>(0.0, 0.0, 0.0, 0.0);
         if (input.shadow_blur > 0.0 && input.shadow_color.a > 0.0) {
-            let shadow_coverage = 1.0 - smoothstep(0.0, input.shadow_blur + aa, max(shadow_distance, 0.0));
+            let shadow_coverage = gaussian_shadow(shadow_distance, input.shadow_blur, aa) * (1.0 - coverage);
             out_color = vec4<f32>(input.shadow_color.rgb, input.shadow_color.a * shadow_coverage);
         }
 
