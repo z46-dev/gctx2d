@@ -873,6 +873,10 @@ func (r *Context) Fill() {
 // Stroke strokes all current canvas-style subpaths with the current stroke style and line width.
 func (r *Context) Stroke() {
 	subpaths := r.flattenPath()
+	if r.hasShadow() {
+		r.appendStrokeShadow(subpaths)
+	}
+
 	for _, subpath := range subpaths {
 		r.appendStrokePath(subpath.points, subpath.closed, r.lineWidth, r.strokeStyle)
 	}
@@ -1347,7 +1351,7 @@ func (r *Context) appendFilledPolygon(points []Point, color Color) {
 
 	var origin Point = points[0]
 	for i := 1; i < len(points)-1; i++ {
-		r.appendSolidTriangle(origin, points[i], points[i+1], color)
+		r.appendSolidTriangleNoShadow(origin, points[i], points[i+1], color)
 	}
 }
 
@@ -1426,7 +1430,7 @@ func (r *Context) appendStrokePath(points []Point, closed bool, lineWidth float3
 		for i := 0; i < len(segments); i++ {
 			prev := segments[(i-1+len(segments))%len(segments)]
 			curr := segments[i]
-			r.appendStrokeJoin(points[i], prev, curr, halfWidth, color)
+			r.appendStrokeJoin(curr.a, prev, curr, halfWidth, color)
 		}
 		return
 	}
@@ -1437,8 +1441,21 @@ func (r *Context) appendStrokePath(points []Point, closed bool, lineWidth float3
 	}
 
 	for i := 1; i < len(segments); i++ {
-		r.appendStrokeJoin(points[i], segments[i-1], segments[i], halfWidth, color)
+		r.appendStrokeJoin(segments[i].a, segments[i-1], segments[i], halfWidth, color)
 	}
+}
+
+func (r *Context) appendStrokePathOffset(points []Point, closed bool, lineWidth float32, color Color, offset Point) {
+	if len(points) < 2 {
+		return
+	}
+
+	shifted := make([]Point, len(points))
+	for i, p := range points {
+		shifted[i] = Point{X: p.X + offset.X, Y: p.Y + offset.Y}
+	}
+
+	r.appendStrokePath(shifted, closed, lineWidth, color)
 }
 
 func (r *Context) appendStrokeBody(seg strokeSegment, lineWidth float32, color Color, startExtend, endExtend float32) {
@@ -1450,7 +1467,7 @@ func (r *Context) appendStrokeBody(seg strokeSegment, lineWidth float32, color C
 		Y: (seg.a.Y+seg.b.Y)*0.5 + seg.ty*centerShift,
 	}
 
-	r.appendOrientedSDFQuad(center, seg.tx, seg.ty, seg.nx, seg.ny, halfLength, halfWidth, 0, 0, color)
+	r.appendOrientedSDFQuadNoShadow(center, seg.tx, seg.ty, seg.nx, seg.ny, halfLength, halfWidth, 0, 0, color)
 }
 
 func (r *Context) appendStrokeCapCircle(center Point, radius float32, color Color) {
@@ -1458,7 +1475,7 @@ func (r *Context) appendStrokeCapCircle(center Point, radius float32, color Colo
 		return
 	}
 
-	r.appendAxisAlignedSDFQuad(center, radius, radius, radius, 0, color)
+	r.appendAxisAlignedSDFQuadNoShadow(center, radius, radius, radius, 0, color)
 }
 
 func (r *Context) appendStrokeJoin(vertex Point, prev, next strokeSegment, halfWidth float32, color Color) {
@@ -1491,7 +1508,7 @@ func (r *Context) appendStrokeJoin(vertex Point, prev, next strokeSegment, halfW
 	}
 
 	if r.lineJoin == LineJoinBevel {
-		r.appendSolidTriangle(vertex, outerPrev, outerNext, color)
+		r.appendSolidTriangleNoShadow(vertex, outerPrev, outerNext, color)
 		return
 	}
 
@@ -1500,19 +1517,19 @@ func (r *Context) appendStrokeJoin(vertex Point, prev, next strokeSegment, halfW
 		outerNext, Point{X: outerNext.X + next.tx, Y: outerNext.Y + next.ty},
 	)
 	if !ok {
-		r.appendSolidTriangle(vertex, outerPrev, outerNext, color)
+		r.appendSolidTriangleNoShadow(vertex, outerPrev, outerNext, color)
 		return
 	}
 
 	miterDX, miterDY := miterPoint.X-vertex.X, miterPoint.Y-vertex.Y
 	miterLength := float32(math.Sqrt(float64(miterDX*miterDX + miterDY*miterDY)))
 	if miterLength > r.miterLimit*halfWidth {
-		r.appendSolidTriangle(vertex, outerPrev, outerNext, color)
+		r.appendSolidTriangleNoShadow(vertex, outerPrev, outerNext, color)
 		return
 	}
 
-	r.appendSolidTriangle(vertex, outerPrev, miterPoint, color)
-	r.appendSolidTriangle(vertex, miterPoint, outerNext, color)
+	r.appendSolidTriangleNoShadow(vertex, outerPrev, miterPoint, color)
+	r.appendSolidTriangleNoShadow(vertex, miterPoint, outerNext, color)
 }
 
 func lineIntersection(a0, a1, b0, b1 Point) (Point, bool) {
@@ -1530,11 +1547,7 @@ func lineIntersection(a0, a1, b0, b1 Point) (Point, bool) {
 
 // appendSolidTriangle appends a triangle that uses the normal solid/SDF branch with radius zero.
 func (r *Context) appendSolidTriangle(a, b, c Point, color Color) {
-	start := uint32(len(r.vertices))
-	r.appendSolidVertex(a.X, a.Y, color)
-	r.appendSolidVertex(b.X, b.Y, color)
-	r.appendSolidVertex(c.X, c.Y, color)
-	r.appendBatch(nil, r.activeTextureGroup(), nil, start, 3)
+	r.appendSolidTriangleNoShadow(a, b, c, color)
 }
 
 func (r *Context) appendSolidTriangleNoShadow(a, b, c Point, color Color) {
@@ -1554,11 +1567,11 @@ func (r *Context) appendSolidVertexNoShadow(x, y float32, color Color) {
 	r.appendSDFVertexWithShadow(x, y, 0, 0, 1, 1, 0, 0, color, ColorTransparent, 0)
 }
 
-func (r *Context) appendAxisAlignedSDFQuad(center Point, halfWidth, halfHeight, radius, strokeWidth float32, color Color) {
-	r.appendOrientedSDFQuad(center, 1, 0, 0, 1, halfWidth, halfHeight, radius, strokeWidth, color)
+func (r *Context) appendAxisAlignedSDFQuadNoShadow(center Point, halfWidth, halfHeight, radius, strokeWidth float32, color Color) {
+	r.appendOrientedSDFQuadNoShadow(center, 1, 0, 0, 1, halfWidth, halfHeight, radius, strokeWidth, color)
 }
 
-func (r *Context) appendOrientedSDFQuad(center Point, tx, ty, nx, ny, halfWidth, halfHeight, radius, strokeWidth float32, color Color) {
+func (r *Context) appendOrientedSDFQuadNoShadow(center Point, tx, ty, nx, ny, halfWidth, halfHeight, radius, strokeWidth float32, color Color) {
 	padding := float32(2)
 	if r.hasShadow() {
 		padding += quadShadowPadding(r.shadowBlur)
@@ -1579,7 +1592,7 @@ func (r *Context) appendOrientedSDFQuad(center Point, tx, ty, nx, ny, halfWidth,
 	for _, local := range locals {
 		px := center.X + tx*local[0] + nx*local[1]
 		py := center.Y + ty*local[0] + ny*local[1]
-		r.appendSDFVertex(px, py, local[0], local[1], halfWidth, halfHeight, radius, strokeWidth, color)
+		r.appendSDFVertexWithShadow(px, py, local[0], local[1], halfWidth, halfHeight, radius, strokeWidth, color, ColorTransparent, 0)
 	}
 
 	r.appendBatch(nil, r.activeTextureGroup(), nil, start, 6)
@@ -1666,8 +1679,8 @@ func (r *Context) hasShadow() bool {
 }
 
 func (r *Context) appendPathShadow(subpaths []pathSubpath) {
-	for _, sample := range shadowSamples(r.shadowBlur) {
-		color := r.shadowColor
+	for _, sample := range shapeShadowSamples(r.shadowBlur) {
+		color := r.applyGlobalAlpha(r.shadowColor)
 		color.A *= sample.weight
 		if color.A <= 0 {
 			continue
@@ -1676,6 +1689,21 @@ func (r *Context) appendPathShadow(subpaths []pathSubpath) {
 		offset := Point{X: sample.dx, Y: sample.dy}
 		for _, subpath := range subpaths {
 			r.appendFilledPolygonOffset(subpath.points, offset, color)
+		}
+	}
+}
+
+func (r *Context) appendStrokeShadow(subpaths []pathSubpath) {
+	for _, sample := range shapeShadowSamples(r.shadowBlur) {
+		color := r.applyGlobalAlpha(r.shadowColor)
+		color.A *= sample.weight
+		if color.A <= 0 {
+			continue
+		}
+
+		offset := Point{X: sample.dx, Y: sample.dy}
+		for _, subpath := range subpaths {
+			r.appendStrokePathOffset(subpath.points, subpath.closed, r.lineWidth, color, offset)
 		}
 	}
 }
@@ -1723,7 +1751,7 @@ type shadowSample struct {
 	weight float32
 }
 
-func shadowSamples(blur float32) []shadowSample {
+func shapeShadowSamples(blur float32) []shadowSample {
 	if blur <= 0 {
 		return nil
 	}
@@ -1737,9 +1765,8 @@ func shadowSamples(blur float32) []shadowSample {
 	}
 
 	innerCount := outerCount / 2
-	samples := make([]shadowSample, 0, outerCount+innerCount+1)
-	var totalWeight float32 = 1.5
-	samples = append(samples, shadowSample{weight: 1.5})
+	samples := make([]shadowSample, 0, outerCount+innerCount)
+	var totalWeight float32
 
 	if blur > 1 {
 		innerRadius := blur * 0.55
