@@ -101,7 +101,10 @@ fn compose_over(dst: vec4<f32>, src: vec4<f32>) -> vec4<f32> {
 }
 
 fn quad_uv(local: vec2<f32>, half_size: vec2<f32>, uv_min: vec2<f32>, uv_max: vec2<f32>) -> vec2<f32> {
-    let safe_half = max(half_size, vec2<f32>(0.5, 0.5));
+    // Preserve correct UV mapping for very small quads. Clamping to 0.5 collapses
+    // sub-unit images/glyphs toward the center of the texture, which makes tiny
+    // sprites disappear when drawn through a parent transform.
+    let safe_half = max(half_size, vec2<f32>(1e-5, 1e-5));
     let t = local / safe_half * 0.5 + vec2<f32>(0.5, 0.5);
     return mix(uv_min, uv_max, t);
 }
@@ -123,7 +126,7 @@ fn sample_shadow_alpha(input: VertexOut) -> f32 {
     }
 
     let uv_span = input.uv_max - input.uv_min;
-    let safe_size = max(input.half_size * 2.0, vec2<f32>(1.0, 1.0));
+    let safe_size = max(input.half_size * 2.0, vec2<f32>(1e-5, 1e-5));
     let uv_per_pixel = uv_span / safe_size;
     let step_uv = uv_per_pixel * max(input.shadow_blur * 0.75, 1.0);
     let base_uv = quad_uv(input.local, input.half_size, input.uv_min, input.uv_max);
