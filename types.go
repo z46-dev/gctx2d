@@ -26,6 +26,11 @@ type (
 		Y float32
 	}
 
+	// TextLineMetrics describes a single line rendered with the active font.
+	TextLineMetrics struct {
+		Width, Ascent, Descent, LineHeight float32
+	}
+
 	Matrix struct {
 		A float32
 		B float32
@@ -47,6 +52,7 @@ type (
 		shadowBlur         float32
 		textAlign          TextAlign
 		textBaseline       TextBaseline
+		disableTextKerning bool
 		transform          Matrix
 		imageEffect        ImageEffect
 		effectTime         float32
@@ -204,6 +210,7 @@ type (
 		shadowBlur         float32
 		textAlign          TextAlign
 		textBaseline       TextBaseline
+		disableTextKerning bool
 		transform          Matrix
 		imageEffect        ImageEffect
 		effectTime         float32

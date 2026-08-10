@@ -2,6 +2,7 @@ package gctx2d
 
 import (
 	"math"
+	"slices"
 	"testing"
 
 	"github.com/gogpu/wgpu"
@@ -165,6 +166,32 @@ func TestTextMeasurementAndPlacementUseKerning(t *testing.T) {
 	if got := ctx.measureTextLine("até", atlas); got != 23 {
 		t.Fatalf("expected fallback glyph to participate in kerning, got width %v", got)
 	}
+
+	var (
+		allocations float64
+		metrics     TextLineMetrics
+		positions   []float32
+	)
+	ctx.currentFont = &fontFace{atlas: atlas}
+	metrics, positions = ctx.MeasureTextLine("at", make([]float32, 0, 3))
+	if metrics.Width != 16 || metrics.Ascent != atlas.Ascent || metrics.Descent != atlas.Descent || metrics.LineHeight != atlas.LineHeight {
+		t.Fatalf("unexpected public text metrics: %+v", metrics)
+	}
+	if !slices.Equal(positions, []float32{0, 8, 16}) {
+		t.Fatalf("unexpected kerned caret positions: %v", positions)
+	}
+	allocations = testing.AllocsPerRun(100, func() {
+		metrics, positions = ctx.MeasureTextLine("at", positions[:0])
+	})
+	if allocations != 0 {
+		t.Fatalf("MeasureTextLine allocated %v times with reusable storage", allocations)
+	}
+	ctx.SetTextKerning(false)
+	metrics, positions = ctx.MeasureTextLine("at", positions[:0])
+	if metrics.Width != 18 || !slices.Equal(positions, []float32{0, 10, 18}) {
+		t.Fatalf("un-kerned measurement produced width=%v positions=%v", metrics.Width, positions)
+	}
+	ctx.SetTextKerning(true)
 
 	ctx.appendTextLine(&fontFace{}, atlas, "at", 0, 20, ColorWhite)
 	if len(ctx.vertices) != 12 {

@@ -534,6 +534,11 @@ func (r *Context) SetTextBaseline(baseline TextBaseline) {
 	}
 }
 
+// SetTextKerning controls whether font kerning pairs affect text placement and measurement.
+func (r *Context) SetTextKerning(enabled bool) {
+	r.disableTextKerning = !enabled
+}
+
 // SetImageEffect sets the image shader effect used by subsequent DrawImage calls.
 func (r *Context) SetImageEffect(effect ImageEffect) {
 	r.imageEffect = effect
@@ -572,6 +577,7 @@ func (r *Context) drawingState() drawingState {
 		shadowBlur:         r.shadowBlur,
 		textAlign:          r.textAlign,
 		textBaseline:       r.textBaseline,
+		disableTextKerning: r.disableTextKerning,
 		transform:          r.transform,
 		imageEffect:        r.imageEffect,
 		effectTime:         r.effectTime,
@@ -592,6 +598,7 @@ func (r *Context) restoreDrawingState(state drawingState) {
 	r.shadowBlur = state.shadowBlur
 	r.textAlign = state.textAlign
 	r.textBaseline = state.textBaseline
+	r.disableTextKerning = state.disableTextKerning
 	r.transform = state.transform
 	r.imageEffect = state.imageEffect
 	r.effectTime = state.effectTime
@@ -1009,6 +1016,21 @@ func (r *Context) FillText(s string, x, y float32) {
 	r.appendTextRun(s, x, y, r.fillStyle)
 }
 
+// MeasureTextLine measures a single line with the active font and optionally writes exact caret positions.
+// Pass a non-nil reusable slice to receive one position per rune boundary, beginning at zero.
+func (r *Context) MeasureTextLine(s string, caretPositions []float32) (metrics TextLineMetrics, positions []float32) {
+	if r == nil || r.currentFont == nil || r.currentFont.atlas == nil {
+		return
+	}
+
+	var atlas *fontAtlas = r.currentFont.atlas
+	metrics.Ascent = atlas.Ascent
+	metrics.Descent = atlas.Descent
+	metrics.LineHeight = atlas.LineHeight
+	metrics.Width, positions = measureTextLineInto(s, atlas, caretPositions, !r.disableTextKerning)
+	return
+}
+
 // StrokeText draws an ASCII-oriented text stroke with the current stroke style and line width.
 // x/y are interpreted using the current text align and baseline settings.
 // If no font has been selected with SetFont, this is a no-op.
@@ -1055,9 +1077,14 @@ func (r *Context) appendTextRun(s string, x, y float32, color Color) {
 	var (
 		face  *fontFace  = r.currentFont
 		atlas *fontAtlas = face.atlas
-		lines []string   = strings.Split(s, "\n")
 	)
+	if !strings.ContainsRune(s, '\n') {
+		var baselineY float32 = r.resolveTextBaselineY(y, 1, atlas)
+		r.appendTextLine(face, atlas, s, r.resolveTextAlignX(x, r.measureTextLine(s, atlas)), baselineY, color)
+		return
+	}
 
+	var lines []string = strings.Split(s, "\n")
 	if len(lines) == 0 {
 		return
 	}
@@ -1095,7 +1122,7 @@ func (r *Context) appendTextLine(face *fontFace, atlas *fontAtlas, s string, pen
 			}
 		}
 
-		if hasPrevious {
+		if hasPrevious && !r.disableTextKerning {
 			penX += atlas.Kerning[[2]rune{previous, glyphRune}]
 		}
 
@@ -1119,6 +1146,15 @@ func (r *Context) appendTextLine(face *fontFace, atlas *fontAtlas, s string, pen
 }
 
 func (r *Context) measureTextLine(s string, atlas *fontAtlas) (width float32) {
+	width, _ = measureTextLineInto(s, atlas, nil, !r.disableTextKerning)
+	return
+}
+
+func measureTextLineInto(s string, atlas *fontAtlas, caretPositions []float32, kerning bool) (width float32, positions []float32) {
+	var recordPositions bool = caretPositions != nil
+	if recordPositions {
+		positions = append(caretPositions[:0], 0)
+	}
 	if atlas == nil || len(s) == 0 {
 		return
 	}
@@ -1138,15 +1174,24 @@ func (r *Context) measureTextLine(s string, atlas *fontAtlas) (width float32) {
 		if g, ok = atlas.Glyphs[ch]; !ok {
 			glyphRune = '?'
 			if g, ok = atlas.Glyphs[glyphRune]; !ok {
+				if recordPositions {
+					positions = append(positions, width)
+				}
 				continue
 			}
 		}
 
-		if hasPrevious {
+		if hasPrevious && kerning {
 			width += atlas.Kerning[[2]rune{previous, glyphRune}]
+			if recordPositions {
+				positions[len(positions)-1] = width
+			}
 		}
 
 		width += g.Advance
+		if recordPositions {
+			positions = append(positions, width)
+		}
 		previous = glyphRune
 		hasPrevious = true
 	}
