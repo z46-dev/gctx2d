@@ -22,6 +22,7 @@ const (
 	atlasWidth  = 1024
 	atlasHeight = 1024
 	atlasPad    = 2
+	glyphMargin = 1
 )
 
 const (
@@ -335,17 +336,17 @@ func buildFontAtlas(handle *FontHandle, size float64, weight FontWeight) (atlas 
 		}
 
 		atlas.Glyphs[r] = glyph{
-			X:        float32(gx),
-			Y:        float32(gy),
-			W:        float32(glyphW),
-			H:        float32(glyphH),
-			U0:       float32(gx) / float32(atlasWidth),
-			V0:       float32(gy) / float32(atlasHeight),
-			U1:       float32(gx+glyphW) / float32(atlasWidth),
-			V1:       float32(gy+glyphH) / float32(atlasHeight),
+			X:        float32(gx - glyphMargin),
+			Y:        float32(gy - glyphMargin),
+			W:        float32(glyphW + glyphMargin*2),
+			H:        float32(glyphH + glyphMargin*2),
+			U0:       float32(gx-glyphMargin) / float32(atlasWidth),
+			V0:       float32(gy-glyphMargin) / float32(atlasHeight),
+			U1:       float32(gx+glyphW+glyphMargin) / float32(atlasWidth),
+			V1:       float32(gy+glyphH+glyphMargin) / float32(atlasHeight),
 			Advance:  fixedToFloat32(advance) + float32(extraW),
-			BearingX: float32(minX),
-			BearingY: float32(minY),
+			BearingX: float32(minX - glyphMargin),
+			BearingY: float32(minY - glyphMargin),
 		}
 
 		x += cellW

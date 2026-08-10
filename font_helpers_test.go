@@ -111,3 +111,34 @@ func TestLoadFontValidation(t *testing.T) {
 		t.Fatal("expected empty font path to fail")
 	}
 }
+
+func TestBuiltGlyphsKeepTransparentSamplingMargin(t *testing.T) {
+	var (
+		handle         *FontHandle
+		atlas          *fontAtlas
+		err            error
+		x0, y0, x1, y1 int
+	)
+	if handle, err = LoadFontByName(DefaultFontName()); err != nil {
+		t.Fatal(err)
+	}
+	if atlas, err = buildFontAtlas(handle, 16, FontWeightRegular); err != nil {
+		t.Fatal(err)
+	}
+
+	for character := rune(33); character <= rune(126); character++ {
+		var glyph glyph = atlas.Glyphs[character]
+		x0, y0 = int(glyph.X), int(glyph.Y)
+		x1, y1 = x0+int(glyph.W)-1, y0+int(glyph.H)-1
+		for x := x0; x <= x1; x++ {
+			if atlas.Pixels[(y0*atlas.Width+x)*4+3] != 0 || atlas.Pixels[(y1*atlas.Width+x)*4+3] != 0 {
+				t.Fatalf("glyph %q touches a horizontal atlas sampling edge", character)
+			}
+		}
+		for y := y0; y <= y1; y++ {
+			if atlas.Pixels[(y*atlas.Width+x0)*4+3] != 0 || atlas.Pixels[(y*atlas.Width+x1)*4+3] != 0 {
+				t.Fatalf("glyph %q touches a vertical atlas sampling edge", character)
+			}
+		}
+	}
+}
