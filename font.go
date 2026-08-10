@@ -261,21 +261,21 @@ func buildFontAtlas(handle *FontHandle, size float64, weight FontWeight) (atlas 
 
 	var (
 		metrics    font.Metrics = face.Metrics()
-		ascent     int          = metrics.Ascent.Ceil()
-		descent    int          = metrics.Descent.Ceil()
-		lineHeight int          = metrics.Height.Ceil()
+		ascent     float32      = fixedToFloat32(metrics.Ascent)
+		descent    float32      = fixedToFloat32(metrics.Descent)
+		lineHeight float32      = fixedToFloat32(metrics.Height)
 	)
 
 	if ascent <= 0 {
-		ascent = int(size * 0.8)
+		ascent = float32(size * 0.8)
 	}
 
 	if descent <= 0 {
-		descent = max(1, int(size*0.2))
+		descent = max(1, float32(size*0.2))
 	}
 
 	if lineHeight <= 0 {
-		lineHeight = int(size * 1.35)
+		lineHeight = float32(size * 1.35)
 	}
 
 	atlas = &fontAtlas{
@@ -283,9 +283,10 @@ func buildFontAtlas(handle *FontHandle, size float64, weight FontWeight) (atlas 
 		Height:     atlasHeight,
 		Pixels:     dst.Pix,
 		Glyphs:     make(map[rune]glyph, 128),
-		LineHeight: float32(lineHeight),
-		Ascent:     float32(ascent),
-		Descent:    float32(descent),
+		Kerning:    make(map[[2]rune]float32),
+		LineHeight: lineHeight,
+		Ascent:     ascent,
+		Descent:    descent,
 	}
 
 	var (
@@ -303,7 +304,9 @@ func buildFontAtlas(handle *FontHandle, size float64, weight FontWeight) (atlas 
 		var (
 			s               string = string(r)
 			bounds, advance        = font.BoundString(face, s)
-			glyphW, glyphH  int    = max(1, (bounds.Max.X-bounds.Min.X).Ceil()+extraW), max(1, (bounds.Max.Y - bounds.Min.Y).Ceil())
+			minX, minY      int    = bounds.Min.X.Floor(), bounds.Min.Y.Floor()
+			maxX, maxY      int    = bounds.Max.X.Ceil(), bounds.Max.Y.Ceil()
+			glyphW, glyphH  int    = max(1, maxX-minX+extraW), max(1, maxY-minY)
 			cellW, cellH    int    = glyphW + atlasPad*2, glyphH + atlasPad*2
 		)
 
@@ -323,8 +326,8 @@ func buildFontAtlas(handle *FontHandle, size float64, weight FontWeight) (atlas 
 		if r != ' ' {
 			for _, xOffset := range xOffsets {
 				drawer.Dot = fixed.Point26_6{
-					X: fixed.I(gx+xOffset) - bounds.Min.X,
-					Y: fixed.I(gy) - bounds.Min.Y,
+					X: fixed.I(gx + xOffset - minX),
+					Y: fixed.I(gy - minY),
 				}
 
 				drawer.DrawString(s)
@@ -340,9 +343,9 @@ func buildFontAtlas(handle *FontHandle, size float64, weight FontWeight) (atlas 
 			V0:       float32(gy) / float32(atlasHeight),
 			U1:       float32(gx+glyphW) / float32(atlasWidth),
 			V1:       float32(gy+glyphH) / float32(atlasHeight),
-			Advance:  float32(advance.Ceil() + extraW),
-			BearingX: float32(bounds.Min.X.Floor()),
-			BearingY: float32(bounds.Min.Y.Floor()),
+			Advance:  fixedToFloat32(advance) + float32(extraW),
+			BearingX: float32(minX),
+			BearingY: float32(minY),
 		}
 
 		x += cellW
@@ -351,7 +354,19 @@ func buildFontAtlas(handle *FontHandle, size float64, weight FontWeight) (atlas 
 		}
 	}
 
+	for left := rune(32); left <= rune(126); left++ {
+		for right := rune(32); right <= rune(126); right++ {
+			if kern := fixedToFloat32(face.Kern(left, right)); kern != 0 {
+				atlas.Kerning[[2]rune{left, right}] = kern
+			}
+		}
+	}
+
 	return
+}
+
+func fixedToFloat32(value fixed.Int26_6) float32 {
+	return float32(value) / 64
 }
 
 func normalizeFontWeight(weight FontWeight) FontWeight {

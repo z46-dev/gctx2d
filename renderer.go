@@ -1076,16 +1076,27 @@ func (r *Context) appendTextRun(s string, x, y float32, color Color) {
 }
 
 func (r *Context) appendTextLine(face *fontFace, atlas *fontAtlas, s string, penX, penY float32, color Color) {
+	var (
+		previous    rune
+		hasPrevious bool
+	)
+
 	for _, ch := range s {
 		var (
-			g  glyph
-			ok bool
+			g         glyph
+			glyphRune rune = ch
+			ok        bool
 		)
 
 		if g, ok = atlas.Glyphs[ch]; !ok {
-			if g, ok = atlas.Glyphs['?']; !ok {
+			glyphRune = '?'
+			if g, ok = atlas.Glyphs[glyphRune]; !ok {
 				continue
 			}
+		}
+
+		if hasPrevious {
+			penX += atlas.Kerning[[2]rune{previous, glyphRune}]
 		}
 
 		if ch != ' ' {
@@ -1102,6 +1113,8 @@ func (r *Context) appendTextLine(face *fontFace, atlas *fontAtlas, s string, pen
 		}
 
 		penX += g.Advance
+		previous = glyphRune
+		hasPrevious = true
 	}
 }
 
@@ -1110,19 +1123,32 @@ func (r *Context) measureTextLine(s string, atlas *fontAtlas) (width float32) {
 		return
 	}
 
+	var (
+		previous    rune
+		hasPrevious bool
+	)
+
 	for _, ch := range s {
 		var (
-			g  glyph
-			ok bool
+			g         glyph
+			glyphRune rune = ch
+			ok        bool
 		)
 
 		if g, ok = atlas.Glyphs[ch]; !ok {
-			if g, ok = atlas.Glyphs['?']; !ok {
+			glyphRune = '?'
+			if g, ok = atlas.Glyphs[glyphRune]; !ok {
 				continue
 			}
 		}
 
+		if hasPrevious {
+			width += atlas.Kerning[[2]rune{previous, glyphRune}]
+		}
+
 		width += g.Advance
+		previous = glyphRune
+		hasPrevious = true
 	}
 
 	return

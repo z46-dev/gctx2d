@@ -141,6 +141,42 @@ func TestDrawingStateSaveRestore(t *testing.T) {
 	ctx.Restore()
 }
 
+func TestTextMeasurementAndPlacementUseKerning(t *testing.T) {
+	atlas := &fontAtlas{
+		Glyphs: map[rune]glyph{
+			'a': {W: 2, H: 4, Advance: 10},
+			't': {W: 2, H: 4, Advance: 8},
+			'?': {W: 2, H: 4, Advance: 6},
+		},
+		Kerning: map[[2]rune]float32{
+			{'a', 't'}: -2,
+			{'t', '?'}: 1,
+		},
+	}
+	ctx := &Context{
+		width:     100,
+		height:    100,
+		transform: uiIdentityMatrix(),
+	}
+
+	if got := ctx.measureTextLine("at", atlas); got != 16 {
+		t.Fatalf("expected kerned width 16, got %v", got)
+	}
+	if got := ctx.measureTextLine("até", atlas); got != 23 {
+		t.Fatalf("expected fallback glyph to participate in kerning, got width %v", got)
+	}
+
+	ctx.appendTextLine(&fontFace{}, atlas, "at", 0, 20, ColorWhite)
+	if len(ctx.vertices) != 12 {
+		t.Fatalf("expected two glyph quads, got %d vertices", len(ctx.vertices))
+	}
+
+	secondGlyphX, _ := ctx.pixelToClip(8, 20)
+	if got := ctx.vertices[6].Position[0]; got != secondGlyphX {
+		t.Fatalf("expected second glyph x to include kerning, got %v, want %v", got, secondGlyphX)
+	}
+}
+
 func TestMatrixHelpers(t *testing.T) {
 	id := IdentityMatrix()
 	if id != (Matrix{A: 1, D: 1}) {

@@ -91,6 +91,7 @@ type (
 		Height     int
 		Pixels     []byte
 		Glyphs     map[rune]glyph
+		Kerning    map[[2]rune]float32
 		LineHeight float32
 		Ascent     float32
 		Descent    float32

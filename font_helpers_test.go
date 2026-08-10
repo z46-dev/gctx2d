@@ -3,6 +3,8 @@ package gctx2d
 import (
 	"path/filepath"
 	"testing"
+
+	"golang.org/x/image/math/fixed"
 )
 
 func TestFontHandlePathAndNameNormalization(t *testing.T) {
@@ -68,6 +70,12 @@ func TestFontWeightHelpers(t *testing.T) {
 	}
 	if got := syntheticFontWeightOffsets(FontWeightBlack); len(got) != 4 {
 		t.Fatalf("unexpected black synthetic offsets: %#v", got)
+	}
+}
+
+func TestFixedToFloat32PreservesSubpixelMetrics(t *testing.T) {
+	if got := fixedToFloat32(fixed.Int26_6(97)); got != 1.515625 {
+		t.Fatalf("unexpected fixed-point conversion: %v", got)
 	}
 }
 
