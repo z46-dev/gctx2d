@@ -806,6 +806,32 @@ func (r *Context) Circle(cx, cy, radius float32) {
 	r.ClosePath()
 }
 
+// FillRoundedRect draws an antialiased rounded rectangle through the SDF fast path.
+func (r *Context) FillRoundedRect(x, y, width, height, radius float32) {
+	r.appendTransformedSDFRect(x, y, width, height, radius, 0, r.fillStyle)
+}
+
+// StrokeRoundedRect draws an antialiased rounded-rectangle outline through the SDF fast path.
+func (r *Context) StrokeRoundedRect(x, y, width, height, radius float32) {
+	if r.lineWidth > 0 {
+		r.appendTransformedSDFRect(x, y, width, height, radius, r.lineWidth, r.strokeStyle)
+	}
+}
+
+// FillCircle draws an antialiased circle through the SDF fast path.
+func (r *Context) FillCircle(cx, cy, radius float32) {
+	if radius > 0 {
+		r.appendTransformedSDFRect(cx-radius, cy-radius, radius*2, radius*2, radius, 0, r.fillStyle)
+	}
+}
+
+// StrokeCircle draws an antialiased circle outline through the SDF fast path.
+func (r *Context) StrokeCircle(cx, cy, radius float32) {
+	if radius > 0 && r.lineWidth > 0 {
+		r.appendTransformedSDFRect(cx-radius, cy-radius, radius*2, radius*2, radius, r.lineWidth, r.strokeStyle)
+	}
+}
+
 // Arc appends a circular arc to the current canvas-style path. Angles are in radians.
 func (r *Context) Arc(cx, cy, radius, startAngle, endAngle float32, counterClockwise bool) {
 	if radius <= 0 {
@@ -1640,6 +1666,70 @@ func (r *Context) appendSolidVertexNoShadow(x, y float32, color Color) {
 
 func (r *Context) appendAxisAlignedSDFQuadNoShadow(center Point, halfWidth, halfHeight, radius, strokeWidth float32, color Color) {
 	r.appendOrientedSDFQuadNoShadow(center, 1, 0, 0, 1, halfWidth, halfHeight, radius, strokeWidth, color)
+}
+
+func (r *Context) appendTransformedSDFRect(x, y, width, height, radius, strokeWidth float32, color Color) {
+	var (
+		center                Point
+		scaleX, scaleY, scale float32
+	)
+	if width == 0 || height == 0 {
+		return
+	}
+	if width < 0 {
+		x += width
+		width = -width
+	}
+	if height < 0 {
+		y += height
+		height = -height
+	}
+
+	scaleX = float32(math.Hypot(float64(r.transform.A), float64(r.transform.B)))
+	scaleY = float32(math.Hypot(float64(r.transform.C), float64(r.transform.D)))
+	if scaleX == 0 || scaleY == 0 {
+		return
+	}
+	scale = min(scaleX, scaleY)
+	center = r.transform.Apply(x+width/2, y+height/2)
+	r.appendOrientedSDFQuad(
+		center,
+		r.transform.A/scaleX,
+		r.transform.B/scaleX,
+		r.transform.C/scaleY,
+		r.transform.D/scaleY,
+		width*scaleX/2,
+		height*scaleY/2,
+		max(0, min(radius*scale, min(width*scaleX, height*scaleY)/2)),
+		strokeWidth*scale,
+		color,
+	)
+}
+
+func (r *Context) appendOrientedSDFQuad(center Point, tx, ty, nx, ny, halfWidth, halfHeight, radius, strokeWidth float32, color Color) {
+	var padding float32 = 2 + strokeWidth/2 + quadShadowPadding(r.shadowBlur)
+	var (
+		extentX float32 = halfWidth + padding
+		extentY float32 = halfHeight + padding
+		locals          = [6][2]float32{
+			{-extentX, -extentY},
+			{extentX, -extentY},
+			{extentX, extentY},
+			{-extentX, -extentY},
+			{extentX, extentY},
+			{-extentX, extentY},
+		}
+		start uint32 = uint32(len(r.vertices))
+	)
+	for _, local := range locals {
+		r.appendSDFVertex(
+			center.X+tx*local[0]+nx*local[1],
+			center.Y+ty*local[0]+ny*local[1],
+			local[0], local[1], halfWidth, halfHeight, radius, strokeWidth, color,
+		)
+	}
+
+	r.appendBatch(nil, r.activeTextureGroup(), nil, start, 6)
 }
 
 func (r *Context) appendOrientedSDFQuadNoShadow(center Point, tx, ty, nx, ny, halfWidth, halfHeight, radius, strokeWidth float32, color Color) {
