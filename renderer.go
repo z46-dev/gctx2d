@@ -34,6 +34,21 @@ const (
 	LineJoinBevel
 )
 
+// Clip modes control how a new clipping path is combined with the active clip.
+const (
+	ClipModeIntersect ClipMode = iota
+	ClipModeDifference
+	ClipModeReplace
+)
+
+const (
+	clipOperationNone clipOperation = iota
+	clipOperationIncrement
+	clipOperationDecrement
+)
+
+const stencilFormat = gputypes.TextureFormatStencil8
+
 const (
 	pathCommandMoveTo pathCommandKind = iota
 	pathCommandLineTo
@@ -76,6 +91,7 @@ func NewContext(device *wgpu.Device, targetFormat gputypes.TextureFormat) (rende
 		imageEffect:  ImageEffectNone,
 		stateStack:   make([]drawingState, 0, 32),
 		path:         make([]pathCommand, 0, 128),
+		clips:        make([]*clipEntry, 0, 16),
 	}
 
 	if err = renderer.createFontSampler(); err != nil {
@@ -130,6 +146,18 @@ func (r *Context) Release() {
 		r.pipeline.Release()
 		r.pipeline = nil
 	}
+
+	if r.clipIncrementPipeline != nil {
+		r.clipIncrementPipeline.Release()
+		r.clipIncrementPipeline = nil
+	}
+
+	if r.clipDecrementPipeline != nil {
+		r.clipDecrementPipeline.Release()
+		r.clipDecrementPipeline = nil
+	}
+
+	r.releaseStencilAttachment()
 
 	if r.pipelineLayout != nil {
 		r.pipelineLayout.Release()
@@ -377,6 +405,7 @@ func (r *Context) createPipeline(targetFormat gputypes.TextureFormat) (err error
 		},
 	}
 
+	drawStencil := stencilState(wgpu.StencilOperationKeep)
 	if r.pipeline, err = r.device.CreateRenderPipeline(&wgpu.RenderPipelineDescriptor{
 		Label:  "Conquest UI Pipeline",
 		Layout: r.pipelineLayout,
@@ -420,11 +449,66 @@ func (r *Context) createPipeline(targetFormat gputypes.TextureFormat) (err error
 				},
 			},
 		},
+		DepthStencil: &drawStencil,
 	}); err != nil {
 		err = fmt.Errorf("create UI render pipeline: %w", err)
+		return
+	}
+
+	var clipShader *wgpu.ShaderModule
+	if clipShader, err = r.device.CreateShaderModule(&wgpu.ShaderModuleDescriptor{Label: "gctx2d Clip Shader", WGSL: clipWGSL}); err != nil {
+		err = fmt.Errorf("create clip shader module: %w", err)
+		return
+	}
+	defer clipShader.Release()
+
+	if r.clipIncrementPipeline, err = r.createClipPipeline(clipShader, "gctx2d Clip Increment Pipeline", wgpu.StencilOperationIncrementClamp); err != nil {
+		return
+	}
+	if r.clipDecrementPipeline, err = r.createClipPipeline(clipShader, "gctx2d Clip Decrement Pipeline", wgpu.StencilOperationDecrementClamp); err != nil {
+		return
 	}
 
 	return
+}
+
+func stencilState(passOperation wgpu.StencilOperation) wgpu.DepthStencilState {
+	face := wgpu.StencilFaceState{
+		Compare:     gputypes.CompareFunctionEqual,
+		FailOp:      wgpu.StencilOperationKeep,
+		DepthFailOp: wgpu.StencilOperationKeep,
+		PassOp:      passOperation,
+	}
+	return wgpu.DepthStencilState{
+		Format:           stencilFormat,
+		DepthCompare:     gputypes.CompareFunctionAlways,
+		StencilFront:     face,
+		StencilBack:      face,
+		StencilReadMask:  0xff,
+		StencilWriteMask: 0xff,
+	}
+}
+
+func (r *Context) createClipPipeline(shader *wgpu.ShaderModule, label string, operation wgpu.StencilOperation) (*wgpu.RenderPipeline, error) {
+	state := stencilState(operation)
+	pipeline, err := r.device.CreateRenderPipeline(&wgpu.RenderPipelineDescriptor{
+		Label:  label,
+		Layout: r.pipelineLayout,
+		Vertex: wgpu.VertexState{
+			Module: shader, EntryPoint: "vs_main",
+			Buffers: []gputypes.VertexBufferLayout{{
+				ArrayStride: vertexStride,
+				StepMode:    gputypes.VertexStepModeVertex,
+				Attributes:  []gputypes.VertexAttribute{{ShaderLocation: 0, Offset: 0, Format: gputypes.VertexFormatFloat32x2}},
+			}},
+		},
+		Primitive:    gputypes.PrimitiveState{Topology: gputypes.PrimitiveTopologyTriangleList, CullMode: gputypes.CullModeNone},
+		DepthStencil: &state,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("create clip pipeline: %w", err)
+	}
+	return pipeline, nil
 }
 
 // Begin starts a new UI frame with the specified dimensions. It must be called before issuing any draw calls.
@@ -439,6 +523,7 @@ func (r *Context) Begin(width, height int) {
 	r.currentImageShader = nil
 	r.effectTime = 0
 	r.stateStack = r.stateStack[:0]
+	r.clips = r.clips[:0]
 }
 
 // SetFillStyle sets the color used by Fill.
@@ -583,6 +668,7 @@ func (r *Context) drawingState() drawingState {
 		effectTime:         r.effectTime,
 		currentImageShader: r.currentImageShader,
 		currentFont:        r.currentFont,
+		clips:              append([]*clipEntry(nil), r.clips...),
 	}
 }
 
@@ -604,6 +690,7 @@ func (r *Context) restoreDrawingState(state drawingState) {
 	r.effectTime = state.effectTime
 	r.currentImageShader = state.currentImageShader
 	r.currentFont = state.currentFont
+	r.transitionClips(state.clips)
 }
 
 // Save pushes the current drawing state onto the stack.
@@ -901,6 +988,101 @@ func (r *Context) Fill() {
 	for _, subpath := range subpaths {
 		r.appendFilledPolygon(subpath.points, r.fillStyle)
 	}
+}
+
+// Clip combines the current path with the active clipping region. With no mode it intersects,
+// matching the HTML canvas API. Difference punches the path out; Replace discards the active
+// region before applying the path. Clip paths use the same convex-subpath tessellation as Fill.
+func (r *Context) Clip(modes ...ClipMode) {
+	mode := ClipModeIntersect
+	if len(modes) > 0 {
+		mode = modes[0]
+	}
+	if mode != ClipModeIntersect && mode != ClipModeDifference && mode != ClipModeReplace {
+		mode = ClipModeIntersect
+	}
+
+	entry := &clipEntry{mode: mode}
+	for _, subpath := range r.flattenPath() {
+		if len(subpath.points) < 3 {
+			continue
+		}
+		start := uint32(len(r.vertices))
+		for i := 1; i+1 < len(subpath.points); i++ {
+			r.appendClipVertex(subpath.points[0])
+			r.appendClipVertex(subpath.points[i])
+			r.appendClipVertex(subpath.points[i+1])
+		}
+		if count := uint32(len(r.vertices)) - start; count > 0 {
+			entry.ranges = append(entry.ranges, vertexRange{start: start, count: count})
+		}
+	}
+
+	if mode == ClipModeReplace {
+		r.transitionClips(nil)
+		entry.mode = ClipModeIntersect
+	}
+	if len(r.clips) >= 255 {
+		return
+	}
+	r.pushClip(entry)
+	r.clips = append(r.clips, entry)
+}
+
+func (r *Context) appendClipVertex(point Point) {
+	x, y := r.pixelToClip(point.X, point.Y)
+	r.vertices = append(r.vertices, vertex{Position: [2]float32{x, y}})
+}
+
+func (r *Context) transitionClips(target []*clipEntry) {
+	common := 0
+	for common < len(r.clips) && common < len(target) && r.clips[common] == target[common] {
+		common++
+	}
+	for i := len(r.clips) - 1; i >= common; i-- {
+		r.popClip(r.clips[i], uint32(i+1))
+	}
+	r.clips = append(r.clips[:0], target[:common]...)
+	for i := common; i < len(target) && i < 255; i++ {
+		r.pushClip(target[i])
+		r.clips = append(r.clips, target[i])
+	}
+}
+
+func (r *Context) pushClip(entry *clipEntry) {
+	depth := uint32(len(r.clips))
+	if entry.mode == ClipModeDifference {
+		r.appendFullscreenClipBatch(clipOperationIncrement, depth)
+		for _, span := range entry.ranges {
+			r.appendClipBatch(clipOperationDecrement, depth+1, span)
+		}
+		return
+	}
+	for _, span := range entry.ranges {
+		r.appendClipBatch(clipOperationIncrement, depth, span)
+	}
+}
+
+func (r *Context) popClip(entry *clipEntry, depth uint32) {
+	if entry.mode == ClipModeDifference {
+		r.appendFullscreenClipBatch(clipOperationDecrement, depth)
+		return
+	}
+	for _, span := range entry.ranges {
+		r.appendClipBatch(clipOperationDecrement, depth, span)
+	}
+}
+
+func (r *Context) appendFullscreenClipBatch(operation clipOperation, reference uint32) {
+	start := uint32(len(r.vertices))
+	for _, p := range [...]Point{{0, 0}, {float32(r.width), 0}, {float32(r.width), float32(r.height)}, {0, 0}, {float32(r.width), float32(r.height)}, {0, float32(r.height)}} {
+		r.appendClipVertex(p)
+	}
+	r.appendClipBatch(operation, reference, vertexRange{start: start, count: 6})
+}
+
+func (r *Context) appendClipBatch(operation clipOperation, reference uint32, span vertexRange) {
+	r.batches = append(r.batches, batch{start: span.start, count: span.count, stencilReference: reference, clipOperation: operation})
 }
 
 // Stroke strokes all current canvas-style subpaths with the current stroke style and line width.
@@ -1272,6 +1454,9 @@ func (r *Context) Flush(target *wgpu.TextureView, clearColor *gputypes.Color) (e
 	}
 
 	if len(r.vertices) > 0 {
+		if err = r.ensureStencilAttachment(); err != nil {
+			return
+		}
 		if err = r.ensureVertexCapacity(len(r.vertices)); err != nil {
 			return
 		}
@@ -1305,8 +1490,7 @@ func (r *Context) Flush(target *wgpu.TextureView, clearColor *gputypes.Color) (e
 		return
 	}
 
-	var pass *wgpu.RenderPassEncoder
-	if pass, err = encoder.BeginRenderPass(&wgpu.RenderPassDescriptor{
+	passDesc := &wgpu.RenderPassDescriptor{
 		ColorAttachments: []wgpu.RenderPassColorAttachment{
 			{
 				View:       target,
@@ -1315,7 +1499,18 @@ func (r *Context) Flush(target *wgpu.TextureView, clearColor *gputypes.Color) (e
 				ClearValue: clear,
 			},
 		},
-	}); err != nil {
+	}
+	if len(r.vertices) > 0 {
+		passDesc.DepthStencilAttachment = &wgpu.RenderPassDepthStencilAttachment{
+			View:              r.stencilView,
+			StencilLoadOp:     gputypes.LoadOpClear,
+			StencilStoreOp:    gputypes.StoreOpDiscard,
+			StencilClearValue: 0,
+		}
+	}
+
+	var pass *wgpu.RenderPassEncoder
+	if pass, err = encoder.BeginRenderPass(passDesc); err != nil {
 		err = fmt.Errorf("begin UI render pass: %w", err)
 		return
 	}
@@ -1330,14 +1525,26 @@ func (r *Context) Flush(target *wgpu.TextureView, clearColor *gputypes.Color) (e
 		)
 
 		for _, batch := range r.batches {
-			if batch.group == nil || batch.count == 0 {
+			if batch.count == 0 || (batch.clipOperation == clipOperationNone && batch.group == nil) {
 				continue
 			}
 
 			pipeline := batch.pipeline
-			if pipeline == nil {
-				pipeline = r.pipeline
+			switch batch.clipOperation {
+			case clipOperationIncrement:
+				pipeline = r.clipIncrementPipeline
+			case clipOperationDecrement:
+				pipeline = r.clipDecrementPipeline
+			case clipOperationNone:
+				if pipeline == nil {
+					pipeline = r.pipeline
+				}
 			}
+			if pipeline == nil {
+				continue
+			}
+
+			pass.SetStencilReference(batch.stencilReference)
 
 			if pipeline != currentPipeline {
 				pass.SetPipeline(pipeline)
@@ -1346,7 +1553,7 @@ func (r *Context) Flush(target *wgpu.TextureView, clearColor *gputypes.Color) (e
 				currentUniform = nil
 			}
 
-			if batch.group != currentGroup {
+			if batch.group != nil && batch.group != currentGroup {
 				pass.SetBindGroup(0, batch.group, nil)
 				currentGroup = batch.group
 			}
@@ -2006,13 +2213,52 @@ func (r *Context) appendBatch(pipeline *wgpu.RenderPipeline, group, uniform *wgp
 
 	if len(r.batches) > 0 {
 		last := &r.batches[len(r.batches)-1]
-		if last.pipeline == pipeline && last.group == group && last.uniform == uniform && last.start+last.count == start {
+		if last.clipOperation == clipOperationNone && last.stencilReference == uint32(len(r.clips)) && last.pipeline == pipeline && last.group == group && last.uniform == uniform && last.start+last.count == start {
 			last.count += count
 			return
 		}
 	}
 
-	r.batches = append(r.batches, batch{pipeline: pipeline, group: group, uniform: uniform, start: start, count: count})
+	r.batches = append(r.batches, batch{pipeline: pipeline, group: group, uniform: uniform, start: start, count: count, stencilReference: uint32(len(r.clips))})
+}
+
+func (r *Context) ensureStencilAttachment() (err error) {
+	if r.stencilTexture != nil && r.stencilView != nil && r.stencilWidth == r.width && r.stencilHeight == r.height {
+		return nil
+	}
+	r.releaseStencilAttachment()
+	if r.width <= 0 || r.height <= 0 {
+		return fmt.Errorf("invalid clipping attachment size %dx%d", r.width, r.height)
+	}
+	if r.stencilTexture, err = r.device.CreateTexture(&wgpu.TextureDescriptor{
+		Label:         "gctx2d Clip Stencil",
+		Size:          wgpu.Extent3D{Width: uint32(r.width), Height: uint32(r.height), DepthOrArrayLayers: 1},
+		MipLevelCount: 1,
+		SampleCount:   1,
+		Dimension:     gputypes.TextureDimension2D,
+		Format:        stencilFormat,
+		Usage:         gputypes.TextureUsageRenderAttachment,
+	}); err != nil {
+		return fmt.Errorf("create clip stencil texture: %w", err)
+	}
+	if r.stencilView, err = r.device.CreateTextureView(r.stencilTexture, nil); err != nil {
+		r.releaseStencilAttachment()
+		return fmt.Errorf("create clip stencil view: %w", err)
+	}
+	r.stencilWidth, r.stencilHeight = r.width, r.height
+	return nil
+}
+
+func (r *Context) releaseStencilAttachment() {
+	if r.stencilView != nil {
+		r.stencilView.Release()
+		r.stencilView = nil
+	}
+	if r.stencilTexture != nil {
+		r.stencilTexture.Release()
+		r.stencilTexture = nil
+	}
+	r.stencilWidth, r.stencilHeight = 0, 0
 }
 
 // flattenPath converts the current canvas-style path into closed/open subpaths.

@@ -26,6 +26,15 @@ ctx.SetFillStyle(gctx2d.ColorBlack)
 ctx.Circle(256, 256, 64)
 ctx.Fill()
 
+// Clip subsequent drawing to a path. Clip state participates in Save/Restore.
+ctx.Save()
+ctx.BeginPath()
+ctx.RoundedRect(32, 32, 448, 448, 24)
+ctx.Clip() // defaults to ClipModeIntersect
+// ctx.Clip(gctx2d.ClipModeDifference) punches the current path out instead.
+ctx.FillCircle(256, 256, 200)
+ctx.Restore()
+
 if err := canvas.Flush(nil); err != nil {
 	return err
 }

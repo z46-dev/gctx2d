@@ -13,6 +13,7 @@ type (
 	TextBaseline int
 	LineCap      int
 	LineJoin     int
+	ClipMode     int
 
 	Color struct {
 		R float32
@@ -58,6 +59,7 @@ type (
 		effectTime         float32
 		currentImageShader ImageShaderBinding
 		currentFont        *fontFace
+		clips              []*clipEntry
 	}
 
 	vertex struct {
@@ -140,11 +142,25 @@ type (
 	}
 
 	batch struct {
-		pipeline *wgpu.RenderPipeline
-		group    *wgpu.BindGroup
-		uniform  *wgpu.BindGroup
-		start    uint32
-		count    uint32
+		pipeline         *wgpu.RenderPipeline
+		group            *wgpu.BindGroup
+		uniform          *wgpu.BindGroup
+		start            uint32
+		count            uint32
+		stencilReference uint32
+		clipOperation    clipOperation
+	}
+
+	clipOperation int
+
+	vertexRange struct {
+		start uint32
+		count uint32
+	}
+
+	clipEntry struct {
+		mode   ClipMode
+		ranges []vertexRange
 	}
 
 	submission struct {
@@ -181,10 +197,12 @@ type (
 		device       *wgpu.Device
 		targetFormat gputypes.TextureFormat
 
-		pipeline       *wgpu.RenderPipeline
-		pipelineLayout *wgpu.PipelineLayout
-		textureLayout  *wgpu.BindGroupLayout
-		imageGroups    map[*gimage.Image]*wgpu.BindGroup
+		pipeline              *wgpu.RenderPipeline
+		clipIncrementPipeline *wgpu.RenderPipeline
+		clipDecrementPipeline *wgpu.RenderPipeline
+		pipelineLayout        *wgpu.PipelineLayout
+		textureLayout         *wgpu.BindGroupLayout
+		imageGroups           map[*gimage.Image]*wgpu.BindGroup
 
 		fontSampler *wgpu.Sampler
 		defaultFont *FontHandle
@@ -217,6 +235,12 @@ type (
 		currentImageShader ImageShaderBinding
 		stateStack         []drawingState
 		path               []pathCommand
+		clips              []*clipEntry
+
+		stencilTexture *wgpu.Texture
+		stencilView    *wgpu.TextureView
+		stencilWidth   int
+		stencilHeight  int
 
 		pending []submission
 	}

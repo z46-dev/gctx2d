@@ -86,6 +86,7 @@ func NewImageShaderProgram[T any](ctx *Context, desc ImageShaderDescriptor) (pro
 		},
 	}
 
+	drawStencil := stencilState(wgpu.StencilOperationKeep)
 	if program.pipeline, err = ctx.device.CreateRenderPipeline(&wgpu.RenderPipelineDescriptor{
 		Label:  desc.Label + " Pipeline",
 		Layout: program.pipelineLayout,
@@ -125,6 +126,7 @@ func NewImageShaderProgram[T any](ctx *Context, desc ImageShaderDescriptor) (pro
 				WriteMask: gputypes.ColorWriteMaskAll,
 			}},
 		},
+		DepthStencil: &drawStencil,
 	}); err != nil {
 		err = fmt.Errorf("create image shader pipeline: %w", err)
 	}
