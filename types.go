@@ -178,9 +178,14 @@ type (
 		imageUniformBindGroup() *wgpu.BindGroup
 	}
 
+	imageStencilShaderBinding interface {
+		imageStencilPipeline() *wgpu.RenderPipeline
+	}
+
 	ImageShaderProgram[T any] struct {
 		device          *wgpu.Device
 		pipeline        *wgpu.RenderPipeline
+		stencilPipeline *wgpu.RenderPipeline
 		pipelineLayout  *wgpu.PipelineLayout
 		uniformLayout   *wgpu.BindGroupLayout
 		uniformByteSize uint64
@@ -198,6 +203,7 @@ type (
 		targetFormat gputypes.TextureFormat
 
 		pipeline              *wgpu.RenderPipeline
+		stencilPipeline       *wgpu.RenderPipeline
 		clipIncrementPipeline *wgpu.RenderPipeline
 		clipDecrementPipeline *wgpu.RenderPipeline
 		pipelineLayout        *wgpu.PipelineLayout
@@ -241,6 +247,7 @@ type (
 		stencilView    *wgpu.TextureView
 		stencilWidth   int
 		stencilHeight  int
+		usesStencil    bool
 
 		pending []submission
 	}

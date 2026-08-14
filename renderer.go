@@ -47,7 +47,7 @@ const (
 	clipOperationDecrement
 )
 
-const stencilFormat = gputypes.TextureFormatStencil8
+const stencilFormat = gputypes.TextureFormatDepth24PlusStencil8
 
 const (
 	pathCommandMoveTo pathCommandKind = iota
@@ -145,6 +145,10 @@ func (r *Context) Release() {
 	if r.pipeline != nil {
 		r.pipeline.Release()
 		r.pipeline = nil
+	}
+	if r.stencilPipeline != nil {
+		r.stencilPipeline.Release()
+		r.stencilPipeline = nil
 	}
 
 	if r.clipIncrementPipeline != nil {
@@ -405,8 +409,7 @@ func (r *Context) createPipeline(targetFormat gputypes.TextureFormat) (err error
 		},
 	}
 
-	drawStencil := stencilState(wgpu.StencilOperationKeep)
-	if r.pipeline, err = r.device.CreateRenderPipeline(&wgpu.RenderPipelineDescriptor{
+	pipelineDesc := &wgpu.RenderPipelineDescriptor{
 		Label:  "Conquest UI Pipeline",
 		Layout: r.pipelineLayout,
 		Vertex: wgpu.VertexState{
@@ -449,9 +452,17 @@ func (r *Context) createPipeline(targetFormat gputypes.TextureFormat) (err error
 				},
 			},
 		},
-		DepthStencil: &drawStencil,
-	}); err != nil {
+	}
+	if r.pipeline, err = r.device.CreateRenderPipeline(pipelineDesc); err != nil {
 		err = fmt.Errorf("create UI render pipeline: %w", err)
+		return
+	}
+
+	drawStencil := stencilState(wgpu.StencilOperationKeep)
+	pipelineDesc.Label = "Conquest UI Stencil Pipeline"
+	pipelineDesc.DepthStencil = &drawStencil
+	if r.stencilPipeline, err = r.device.CreateRenderPipeline(pipelineDesc); err != nil {
+		err = fmt.Errorf("create UI stencil render pipeline: %w", err)
 		return
 	}
 
@@ -524,6 +535,7 @@ func (r *Context) Begin(width, height int) {
 	r.effectTime = 0
 	r.stateStack = r.stateStack[:0]
 	r.clips = r.clips[:0]
+	r.usesStencil = false
 }
 
 // SetFillStyle sets the color used by Fill.
@@ -994,6 +1006,7 @@ func (r *Context) Fill() {
 // matching the HTML canvas API. Difference punches the path out; Replace discards the active
 // region before applying the path. Clip paths use the same convex-subpath tessellation as Fill.
 func (r *Context) Clip(modes ...ClipMode) {
+	r.usesStencil = true
 	mode := ClipModeIntersect
 	if len(modes) > 0 {
 		mode = modes[0]
@@ -1154,7 +1167,14 @@ func (r *Context) appendImageClipBounds(img *gimage.Image, transform Matrix, x, 
 	)
 
 	if r.currentImageShader != nil {
-		pipeline = r.currentImageShader.imagePipeline()
+		if len(r.clips) > 0 {
+			if clippedShader, ok := r.currentImageShader.(imageStencilShaderBinding); ok {
+				pipeline = clippedShader.imageStencilPipeline()
+			}
+		}
+		if pipeline == nil {
+			pipeline = r.currentImageShader.imagePipeline()
+		}
 		uniform = r.currentImageShader.imageUniformBindGroup()
 	}
 
@@ -1454,8 +1474,10 @@ func (r *Context) Flush(target *wgpu.TextureView, clearColor *gputypes.Color) (e
 	}
 
 	if len(r.vertices) > 0 {
-		if err = r.ensureStencilAttachment(); err != nil {
-			return
+		if r.usesStencil {
+			if err = r.ensureStencilAttachment(); err != nil {
+				return
+			}
 		}
 		if err = r.ensureVertexCapacity(len(r.vertices)); err != nil {
 			return
@@ -1500,9 +1522,12 @@ func (r *Context) Flush(target *wgpu.TextureView, clearColor *gputypes.Color) (e
 			},
 		},
 	}
-	if len(r.vertices) > 0 {
+	if len(r.vertices) > 0 && r.usesStencil {
 		passDesc.DepthStencilAttachment = &wgpu.RenderPassDepthStencilAttachment{
 			View:              r.stencilView,
+			DepthLoadOp:       gputypes.LoadOpClear,
+			DepthStoreOp:      gputypes.StoreOpDiscard,
+			DepthClearValue:   1,
 			StencilLoadOp:     gputypes.LoadOpClear,
 			StencilStoreOp:    gputypes.StoreOpDiscard,
 			StencilClearValue: 0,
@@ -1537,7 +1562,11 @@ func (r *Context) Flush(target *wgpu.TextureView, clearColor *gputypes.Color) (e
 				pipeline = r.clipDecrementPipeline
 			case clipOperationNone:
 				if pipeline == nil {
-					pipeline = r.pipeline
+					if batch.stencilReference > 0 {
+						pipeline = r.stencilPipeline
+					} else {
+						pipeline = r.pipeline
+					}
 				}
 			}
 			if pipeline == nil {

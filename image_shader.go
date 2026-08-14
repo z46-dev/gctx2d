@@ -86,8 +86,7 @@ func NewImageShaderProgram[T any](ctx *Context, desc ImageShaderDescriptor) (pro
 		},
 	}
 
-	drawStencil := stencilState(wgpu.StencilOperationKeep)
-	if program.pipeline, err = ctx.device.CreateRenderPipeline(&wgpu.RenderPipelineDescriptor{
+	pipelineDesc := &wgpu.RenderPipelineDescriptor{
 		Label:  desc.Label + " Pipeline",
 		Layout: program.pipelineLayout,
 		Vertex: wgpu.VertexState{
@@ -126,9 +125,17 @@ func NewImageShaderProgram[T any](ctx *Context, desc ImageShaderDescriptor) (pro
 				WriteMask: gputypes.ColorWriteMaskAll,
 			}},
 		},
-		DepthStencil: &drawStencil,
-	}); err != nil {
+	}
+	if program.pipeline, err = ctx.device.CreateRenderPipeline(pipelineDesc); err != nil {
 		err = fmt.Errorf("create image shader pipeline: %w", err)
+		return
+	}
+
+	drawStencil := stencilState(wgpu.StencilOperationKeep)
+	pipelineDesc.Label = desc.Label + " Stencil Pipeline"
+	pipelineDesc.DepthStencil = &drawStencil
+	if program.stencilPipeline, err = ctx.device.CreateRenderPipeline(pipelineDesc); err != nil {
+		err = fmt.Errorf("create image shader stencil pipeline: %w", err)
 	}
 
 	return
@@ -159,6 +166,10 @@ func (p *ImageShaderProgram[T]) Release() {
 	if p.pipeline != nil {
 		p.pipeline.Release()
 		p.pipeline = nil
+	}
+	if p.stencilPipeline != nil {
+		p.stencilPipeline.Release()
+		p.stencilPipeline = nil
 	}
 	if p.pipelineLayout != nil {
 		p.pipelineLayout.Release()
@@ -251,6 +262,13 @@ func (s *ImageShader[T]) imagePipeline() *wgpu.RenderPipeline {
 	}
 
 	return s.program.pipeline
+}
+
+func (s *ImageShader[T]) imageStencilPipeline() *wgpu.RenderPipeline {
+	if s == nil || s.program == nil {
+		return nil
+	}
+	return s.program.stencilPipeline
 }
 
 func (s *ImageShader[T]) imageUniformBindGroup() *wgpu.BindGroup {

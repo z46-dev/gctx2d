@@ -25,6 +25,7 @@ func TestStateSettersAndBeginReset(t *testing.T) {
 		shadowBlur:   3,
 		textAlign:    TextAlignRight,
 		textBaseline: TextBaselineBottom,
+		usesStencil:  true,
 	}
 
 	ctx.SetLineWidth(0)
@@ -84,6 +85,9 @@ func TestStateSettersAndBeginReset(t *testing.T) {
 	}
 	if ctx.imageEffect != ImageEffectNone || ctx.currentImageShader != nil || ctx.effectTime != 0 {
 		t.Fatal("Begin should reset effect state")
+	}
+	if ctx.usesStencil {
+		t.Fatal("Begin should leave frames without clips on the non-stencil render path")
 	}
 }
 

@@ -66,6 +66,9 @@ func TestClipIntersectDifferenceAndRestore(t *testing.T) {
 
 	ctx.Rect(0, 0, 60, 60)
 	ctx.Clip()
+	if !ctx.usesStencil {
+		t.Fatal("Clip should enable the stencil render path for the frame")
+	}
 	if len(ctx.clips) != 1 || ctx.clips[0].mode != ClipModeIntersect {
 		t.Fatalf("default Clip mode did not create an intersect clip: %#v", ctx.clips)
 	}
