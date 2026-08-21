@@ -1,6 +1,7 @@
 package gctx2d
 
 import (
+	_ "embed"
 	"fmt"
 	"math"
 	"strings"
@@ -20,6 +21,18 @@ const (
 const (
 	ImageEffectNone ImageEffect = iota
 	ImageEffectElectric
+)
+
+const (
+	ImageSmoothingModeDefault ImageSmoothingMode = iota
+	ImageSmoothingModeNearest
+	ImageSmoothingModeLinear
+)
+
+const (
+	EdgeAAModeDefault EdgeAAMode = iota
+	EdgeAAModeOff
+	EdgeAAModeOn
 )
 
 const (
@@ -57,6 +70,9 @@ const (
 
 var vertexStride = uint64(unsafe.Sizeof(vertex{}))
 
+//go:embed fallback_ubuntu_bold.ttf
+var fallbackFontBytes []byte
+
 // NewContext creates a new UI renderer with the specified default font.
 // The fontPath should point to a .ttf/.otf file on the user's system, and fontSize is the default pixel size for rendering text.
 // If fontPath is empty, it will attempt to find a common system font automatically.
@@ -67,34 +83,36 @@ func NewContext(device *wgpu.Device, targetFormat gputypes.TextureFormat) (rende
 	}
 
 	var defaultFont *FontHandle
-	if defaultFont, err = LoadFontByName(DefaultFontName()); err != nil {
+	if defaultFont, err = loadDefaultFont(); err != nil {
 		return
 	}
 
 	renderer = &Context{
-		device:       device,
-		targetFormat: targetFormat,
-		imageGroups:  make(map[*gimage.Image]*wgpu.BindGroup),
-		fontFaces:    make(map[fontFaceKey]*fontFace),
-		defaultFont:  defaultFont,
-		vertices:     make([]vertex, 0, 1024),
-		batches:      make([]batch, 0, 128),
-		fillStyle:    ColorWhite,
-		strokeStyle:  ColorWhite,
-		lineWidth:    1,
-		lineCap:      LineCapButt,
-		lineJoin:     LineJoinMiter,
-		miterLimit:   10,
-		globalAlpha:  1,
-		shadowColor:  ColorTransparent,
-		transform:    uiIdentityMatrix(),
-		imageEffect:  ImageEffectNone,
-		stateStack:   make([]drawingState, 0, 32),
-		path:         make([]pathCommand, 0, 128),
-		clips:        make([]*clipEntry, 0, 16),
+		device:             device,
+		targetFormat:       targetFormat,
+		imageGroups:        make(map[imageGroupKey]*wgpu.BindGroup),
+		fontFaces:          make(map[fontFaceKey]*fontFace),
+		defaultFont:        defaultFont,
+		vertices:           make([]vertex, 0, 1024),
+		batches:            make([]batch, 0, 128),
+		fillStyle:          ColorWhite,
+		strokeStyle:        ColorWhite,
+		lineWidth:          1,
+		lineCap:            LineCapButt,
+		lineJoin:           LineJoinMiter,
+		miterLimit:         10,
+		globalAlpha:        1,
+		shadowColor:        ColorTransparent,
+		transform:          uiIdentityMatrix(),
+		imageEffect:        ImageEffectNone,
+		imageSmoothingMode: ImageSmoothingModeDefault,
+		edgeAAMode:         EdgeAAModeDefault,
+		stateStack:         make([]drawingState, 0, 32),
+		path:               make([]pathCommand, 0, 128),
+		clips:              make([]*clipEntry, 0, 16),
 	}
 
-	if err = renderer.createFontSampler(); err != nil {
+	if err = renderer.createSamplers(); err != nil {
 		renderer.Release()
 		renderer = nil
 		return
@@ -187,10 +205,20 @@ func (r *Context) Release() {
 		r.fontSampler.Release()
 		r.fontSampler = nil
 	}
+
+	if r.imageSamplerNearest != nil {
+		r.imageSamplerNearest.Release()
+		r.imageSamplerNearest = nil
+	}
+
+	if r.imageSamplerLinear != nil {
+		r.imageSamplerLinear.Release()
+		r.imageSamplerLinear = nil
+	}
 }
 
-// createFontSampler creates the sampler shared by all font atlas textures.
-func (r *Context) createFontSampler() (err error) {
+// createSamplers creates the shared font and image samplers.
+func (r *Context) createSamplers() (err error) {
 	if r.fontSampler, err = r.device.CreateSampler(&wgpu.SamplerDescriptor{
 		Label:        "Conquest UI Font Atlas Sampler",
 		AddressModeU: gputypes.AddressModeClampToEdge,
@@ -203,6 +231,36 @@ func (r *Context) createFontSampler() (err error) {
 		LodMaxClamp:  32,
 	}); err != nil {
 		err = fmt.Errorf("create UI font atlas sampler: %w", err)
+		return
+	}
+
+	if r.imageSamplerNearest, err = r.device.CreateSampler(&wgpu.SamplerDescriptor{
+		Label:        "gctx2d Image Sampler Nearest",
+		AddressModeU: gputypes.AddressModeClampToEdge,
+		AddressModeV: gputypes.AddressModeClampToEdge,
+		AddressModeW: gputypes.AddressModeClampToEdge,
+		MagFilter:    gputypes.FilterModeNearest,
+		MinFilter:    gputypes.FilterModeNearest,
+		MipmapFilter: gputypes.FilterModeNearest,
+		LodMinClamp:  0,
+		LodMaxClamp:  32,
+	}); err != nil {
+		err = fmt.Errorf("create nearest image sampler: %w", err)
+		return
+	}
+
+	if r.imageSamplerLinear, err = r.device.CreateSampler(&wgpu.SamplerDescriptor{
+		Label:        "gctx2d Image Sampler Linear",
+		AddressModeU: gputypes.AddressModeClampToEdge,
+		AddressModeV: gputypes.AddressModeClampToEdge,
+		AddressModeW: gputypes.AddressModeClampToEdge,
+		MagFilter:    gputypes.FilterModeLinear,
+		MinFilter:    gputypes.FilterModeLinear,
+		MipmapFilter: gputypes.FilterModeNearest,
+		LodMinClamp:  0,
+		LodMaxClamp:  32,
+	}); err != nil {
+		err = fmt.Errorf("create linear image sampler: %w", err)
 	}
 
 	return
@@ -524,13 +582,22 @@ func (r *Context) createClipPipeline(shader *wgpu.ShaderModule, label string, op
 
 // Begin starts a new UI frame with the specified dimensions. It must be called before issuing any draw calls.
 func (r *Context) Begin(width, height int) {
+	r.BeginTarget(width, height, width, height)
+}
+
+// BeginTarget starts a frame whose logical canvas and render target have different dimensions.
+func (r *Context) BeginTarget(width, height, targetWidth, targetHeight int) {
 	r.width = width
 	r.height = height
+	r.targetWidth = targetWidth
+	r.targetHeight = targetHeight
 	r.vertices = r.vertices[:0]
 	r.batches = r.batches[:0]
 	r.path = r.path[:0]
 	r.transform = uiIdentityMatrix()
 	r.imageEffect = ImageEffectNone
+	r.imageSmoothingMode = ImageSmoothingModeDefault
+	r.edgeAAMode = EdgeAAModeDefault
 	r.currentImageShader = nil
 	r.effectTime = 0
 	r.stateStack = r.stateStack[:0]
@@ -651,6 +718,26 @@ func (r *Context) SetImageShader(shader ImageShaderBinding) {
 	r.currentImageShader = shader
 }
 
+// SetImageSmoothingMode sets the sampler mode used by subsequent DrawImage calls.
+func (r *Context) SetImageSmoothingMode(mode ImageSmoothingMode) {
+	switch mode {
+	case ImageSmoothingModeDefault, ImageSmoothingModeNearest, ImageSmoothingModeLinear:
+		r.imageSmoothingMode = mode
+	default:
+		r.imageSmoothingMode = ImageSmoothingModeDefault
+	}
+}
+
+// SetEdgeAAMode sets the antialiasing mode used by SDF-backed helper primitives.
+func (r *Context) SetEdgeAAMode(mode EdgeAAMode) {
+	switch mode {
+	case EdgeAAModeDefault, EdgeAAModeOff, EdgeAAModeOn:
+		r.edgeAAMode = mode
+	default:
+		r.edgeAAMode = EdgeAAModeDefault
+	}
+}
+
 // ResetImageShader restores the default image shader for subsequent DrawImage calls.
 func (r *Context) ResetImageShader() {
 	r.currentImageShader = nil
@@ -677,6 +764,8 @@ func (r *Context) drawingState() drawingState {
 		disableTextKerning: r.disableTextKerning,
 		transform:          r.transform,
 		imageEffect:        r.imageEffect,
+		imageSmoothingMode: r.imageSmoothingMode,
+		edgeAAMode:         r.edgeAAMode,
 		effectTime:         r.effectTime,
 		currentImageShader: r.currentImageShader,
 		currentFont:        r.currentFont,
@@ -699,6 +788,8 @@ func (r *Context) restoreDrawingState(state drawingState) {
 	r.disableTextKerning = state.disableTextKerning
 	r.transform = state.transform
 	r.imageEffect = state.imageEffect
+	r.imageSmoothingMode = state.imageSmoothingMode
+	r.edgeAAMode = state.edgeAAMode
 	r.effectTime = state.effectTime
 	r.currentImageShader = state.currentImageShader
 	r.currentFont = state.currentFont
@@ -767,19 +858,24 @@ func (r *Context) SetTransformPolite(x, y, size, rotation float32) {
 // BeginPath clears the current canvas-style path.
 func (r *Context) BeginPath() {
 	r.path = r.path[:0]
+	r.pathDirty = true
+	r.pathCircle = false
 }
 
 // MoveTo starts a new canvas-style subpath.
 func (r *Context) MoveTo(x, y float32) {
+	r.pathCircle = false
 	var point Point = r.transformPoint(x, y)
 	r.path = append(r.path, pathCommand{
 		kind: pathCommandMoveTo,
 		p:    point,
 	})
+	r.pathDirty = true
 }
 
 // LineTo appends a straight line to the current canvas-style path.
 func (r *Context) LineTo(x, y float32) {
+	r.pathCircle = false
 	if len(r.path) == 0 || r.lastPathCommandKind() == pathCommandClose {
 		r.MoveTo(x, y)
 		return
@@ -790,15 +886,18 @@ func (r *Context) LineTo(x, y float32) {
 		kind: pathCommandLineTo,
 		p:    point,
 	})
+	r.pathDirty = true
 }
 
 // ClosePath closes the current canvas-style subpath.
 func (r *Context) ClosePath() {
+	r.pathCircle = false
 	if len(r.path) == 0 || r.lastPathCommandKind() == pathCommandClose {
 		return
 	}
 
 	r.path = append(r.path, pathCommand{kind: pathCommandClose})
+	r.pathDirty = true
 }
 
 // Rect appends a closed rectangle subpath. Call Fill or Stroke to draw it.
@@ -907,28 +1006,54 @@ func (r *Context) Circle(cx, cy, radius float32) {
 
 // FillRoundedRect draws an antialiased rounded rectangle through the SDF fast path.
 func (r *Context) FillRoundedRect(x, y, width, height, radius float32) {
-	r.appendTransformedSDFRect(x, y, width, height, radius, 0, r.fillStyle)
+	if r.shouldUseEdgeAA() {
+		r.appendTransformedSDFRect(x, y, width, height, radius, 0, r.fillStyle)
+		return
+	}
+
+	r.appendFilledPolygon(r.transformedRoundedRectPoints(x, y, width, height, radius), r.fillStyle)
 }
 
 // StrokeRoundedRect draws an antialiased rounded-rectangle outline through the SDF fast path.
 func (r *Context) StrokeRoundedRect(x, y, width, height, radius float32) {
-	if r.lineWidth > 0 {
-		r.appendTransformedSDFRect(x, y, width, height, radius, r.lineWidth, r.strokeStyle)
+	if r.lineWidth <= 0 {
+		return
 	}
+
+	if r.shouldUseEdgeAA() {
+		r.appendTransformedSDFRect(x, y, width, height, radius, r.lineWidth, r.strokeStyle)
+		return
+	}
+
+	r.appendStrokePath(r.transformedRoundedRectPoints(x, y, width, height, radius), true, r.effectiveStrokeWidth(), r.strokeStyle)
 }
 
 // FillCircle draws an antialiased circle through the SDF fast path.
 func (r *Context) FillCircle(cx, cy, radius float32) {
-	if radius > 0 {
-		r.appendTransformedSDFRect(cx-radius, cy-radius, radius*2, radius*2, radius, 0, r.fillStyle)
+	if radius <= 0 {
+		return
 	}
+
+	if r.shouldUseEdgeAA() {
+		r.appendTransformedSDFRect(cx-radius, cy-radius, radius*2, radius*2, radius, 0, r.fillStyle)
+		return
+	}
+
+	r.appendFilledPolygon(r.transformedArcPoints(cx, cy, radius, 0, float32(math.Pi)*2, false), r.fillStyle)
 }
 
 // StrokeCircle draws an antialiased circle outline through the SDF fast path.
 func (r *Context) StrokeCircle(cx, cy, radius float32) {
-	if radius > 0 && r.lineWidth > 0 {
-		r.appendTransformedSDFRect(cx-radius, cy-radius, radius*2, radius*2, radius, r.lineWidth, r.strokeStyle)
+	if radius <= 0 || r.lineWidth <= 0 {
+		return
 	}
+
+	if r.shouldUseEdgeAA() {
+		r.appendTransformedSDFRect(cx-radius, cy-radius, radius*2, radius*2, radius, r.lineWidth, r.strokeStyle)
+		return
+	}
+
+	r.appendStrokePath(r.transformedArcPoints(cx, cy, radius, 0, float32(math.Pi)*2, false), true, r.effectiveStrokeWidth(), r.strokeStyle)
 }
 
 // Arc appends a circular arc to the current canvas-style path. Angles are in radians.
@@ -937,7 +1062,15 @@ func (r *Context) Arc(cx, cy, radius, startAngle, endAngle float32, counterClock
 		return
 	}
 
+	var standaloneCircle bool = len(r.path) == 0 && float32(math.Abs(float64(endAngle-startAngle))) >= float32(math.Pi)*2-1e-5
 	r.arcPointsToPath(r.arcPoints(cx, cy, radius, startAngle, endAngle, counterClockwise), true)
+	if standaloneCircle {
+		r.pathCircle = true
+		r.pathCircleX = cx
+		r.pathCircleY = cy
+		r.pathCircleRadius = radius
+		r.pathCircleTransform = r.transform
+	}
 }
 
 // Ellipse appends an elliptical arc to the current canvas-style path. Angles are in radians.
@@ -989,9 +1122,13 @@ func (r *Context) CubicCurveTo(cp1x, cp1y, cp2x, cp2y, x, y float32) {
 	r.BezierCurveTo(cp1x, cp1y, cp2x, cp2y, x, y)
 }
 
-// Fill fills all current canvas-style subpaths with the current fill style. The current tessellator is a simple fan,
-// so it is intended for convex subpaths.
+// Fill fills all current canvas-style subpaths with the current fill style.
 func (r *Context) Fill() {
+	if r.pathCircle && !r.hasShadow() {
+		r.appendPathCircleSDF(0, r.fillStyle)
+		return
+	}
+
 	subpaths := r.flattenPath()
 	if r.hasShadow() {
 		r.appendPathShadow(subpaths)
@@ -1004,7 +1141,7 @@ func (r *Context) Fill() {
 
 // Clip combines the current path with the active clipping region. With no mode it intersects,
 // matching the HTML canvas API. Difference punches the path out; Replace discards the active
-// region before applying the path. Clip paths use the same convex-subpath tessellation as Fill.
+// region before applying the path.
 func (r *Context) Clip(modes ...ClipMode) {
 	r.usesStencil = true
 	mode := ClipModeIntersect
@@ -1020,12 +1157,19 @@ func (r *Context) Clip(modes ...ClipMode) {
 		if len(subpath.points) < 3 {
 			continue
 		}
-		start := uint32(len(r.vertices))
-		for i := 1; i+1 < len(subpath.points); i++ {
-			r.appendClipVertex(subpath.points[0])
-			r.appendClipVertex(subpath.points[i])
-			r.appendClipVertex(subpath.points[i+1])
+
+		var triangles [][3]Point = triangulatePolygon(subpath.points)
+		if len(triangles) == 0 {
+			continue
 		}
+
+		start := uint32(len(r.vertices))
+		for _, triangle := range triangles {
+			r.appendClipVertex(triangle[0])
+			r.appendClipVertex(triangle[1])
+			r.appendClipVertex(triangle[2])
+		}
+
 		if count := uint32(len(r.vertices)) - start; count > 0 {
 			entry.ranges = append(entry.ranges, vertexRange{start: start, count: count})
 		}
@@ -1100,14 +1244,35 @@ func (r *Context) appendClipBatch(operation clipOperation, reference uint32, spa
 
 // Stroke strokes all current canvas-style subpaths with the current stroke style and line width.
 func (r *Context) Stroke() {
+	if r.pathCircle && !r.hasShadow() {
+		r.appendPathCircleSDF(r.lineWidth, r.strokeStyle)
+		return
+	}
+
 	subpaths := r.flattenPath()
 	if r.hasShadow() {
 		r.appendStrokeShadow(subpaths)
 	}
 
+	lineWidth := r.effectiveStrokeWidth()
 	for _, subpath := range subpaths {
-		r.appendStrokePath(subpath.points, subpath.closed, r.lineWidth, r.strokeStyle)
+		r.appendStrokePath(subpath.points, subpath.closed, lineWidth, r.strokeStyle)
 	}
+}
+
+func (r *Context) appendPathCircleSDF(strokeWidth float32, color Color) {
+	var transform Matrix = r.transform
+	r.transform = r.pathCircleTransform
+	r.appendTransformedSDFRect(
+		r.pathCircleX-r.pathCircleRadius,
+		r.pathCircleY-r.pathCircleRadius,
+		r.pathCircleRadius*2,
+		r.pathCircleRadius*2,
+		r.pathCircleRadius,
+		strokeWidth,
+		color,
+	)
+	r.transform = transform
 }
 
 // DrawImage draws an image at its natural size with its top-left corner at x/y.
@@ -1676,29 +1841,267 @@ func (r *Context) pollSubmissions() {
 	r.pending = kept
 }
 
-// appendFilledPolygon appends a simple fan triangulation. This is fast and fine for convex HUD shapes.
+// appendFilledPolygon appends a filled polygon, handling both convex and concave simple polygons.
 func (r *Context) appendFilledPolygon(points []Point, color Color) {
-	if len(points) < 3 {
+	points = polygonWithoutClosingPoint(points)
+	if polygonIsConvex(points) {
+		for i := 1; i+1 < len(points); i++ {
+			r.appendSolidTriangleNoShadow(points[0], points[i], points[i+1], color)
+		}
 		return
 	}
 
-	var origin Point = points[0]
-	for i := 1; i < len(points)-1; i++ {
-		r.appendSolidTriangleNoShadow(origin, points[i], points[i+1], color)
+	for _, triangle := range triangulatePolygon(points) {
+		r.appendSolidTriangleNoShadow(triangle[0], triangle[1], triangle[2], color)
 	}
 }
 
-func (r *Context) appendFilledPolygonOffset(points []Point, offset Point, color Color) {
+func polygonWithoutClosingPoint(points []Point) []Point {
+	if len(points) < 2 {
+		return points
+	}
+
+	var (
+		dx float32 = points[0].X - points[len(points)-1].X
+		dy float32 = points[0].Y - points[len(points)-1].Y
+	)
+	if dx*dx+dy*dy <= 1e-8 {
+		return points[:len(points)-1]
+	}
+
+	return points
+}
+
+// polygonIsConvex identifies paths that can use linear fan triangulation.
+func polygonIsConvex(points []Point) bool {
 	if len(points) < 3 {
+		return false
+	}
+
+	var direction float32
+	for i := range len(points) {
+		var cross float32 = triangleCross(points[i], points[(i+1)%len(points)], points[(i+2)%len(points)])
+		if float32(math.Abs(float64(cross))) <= 1e-5 {
+			continue
+		}
+
+		if direction == 0 {
+			direction = cross
+			continue
+		}
+
+		if cross*direction < 0 {
+			return false
+		}
+	}
+
+	return direction != 0
+}
+
+func (r *Context) shouldUseEdgeAA() bool {
+	return r != nil && r.edgeAAMode != EdgeAAModeOff
+}
+
+func (r *Context) transformedArcPoints(cx, cy, radius, startAngle, endAngle float32, counterClockwise bool) (points []Point) {
+	var raw []Point = r.arcPoints(cx, cy, radius, startAngle, endAngle, counterClockwise)
+
+	points = make([]Point, 0, len(raw))
+	for _, point := range raw {
+		points = append(points, r.transform.Apply(point.X, point.Y))
+	}
+
+	return
+}
+
+func (r *Context) transformedRoundedRectPoints(x, y, width, height, radius float32) (points []Point) {
+	if width == 0 || height == 0 {
 		return
 	}
 
-	origin := Point{X: points[0].X + offset.X, Y: points[0].Y + offset.Y}
-	for i := 1; i < len(points)-1; i++ {
-		a := Point{X: points[i].X + offset.X, Y: points[i].Y + offset.Y}
-		b := Point{X: points[i+1].X + offset.X, Y: points[i+1].Y + offset.Y}
-		r.appendSolidTriangleNoShadow(origin, a, b, color)
+	if width < 0 {
+		x += width
+		width = -width
 	}
+
+	if height < 0 {
+		y += height
+		height = -height
+	}
+
+	if radius <= 0 {
+		for _, point := range [...]Point{
+			{X: x, Y: y},
+			{X: x + width, Y: y},
+			{X: x + width, Y: y + height},
+			{X: x, Y: y + height},
+		} {
+			points = append(points, r.transform.Apply(point.X, point.Y))
+		}
+
+		return
+	}
+
+	radius = min(radius, width*0.5)
+	radius = min(radius, height*0.5)
+
+	var (
+		x0 float32 = x
+		y0 float32 = y
+		x1 float32 = x + width
+		y1 float32 = y + height
+	)
+
+	points = append(points, r.transform.Apply(x0+radius, y0))
+	points = append(points, r.transform.Apply(x1-radius, y0))
+	points = append(points, r.transformedArcPoints(x1-radius, y0+radius, radius, -float32(math.Pi)*0.5, 0, false)...)
+	points = append(points, r.transform.Apply(x1, y1-radius))
+	points = append(points, r.transformedArcPoints(x1-radius, y1-radius, radius, 0, float32(math.Pi)*0.5, false)...)
+	points = append(points, r.transform.Apply(x0+radius, y1))
+	points = append(points, r.transformedArcPoints(x0+radius, y1-radius, radius, float32(math.Pi)*0.5, float32(math.Pi), false)...)
+	points = append(points, r.transform.Apply(x0, y0+radius))
+	points = append(points, r.transformedArcPoints(x0+radius, y0+radius, radius, float32(math.Pi), float32(math.Pi)*1.5, false)...)
+	return
+}
+
+func (r *Context) appendFilledPolygonOffset(points []Point, offset Point, color Color) {
+	for _, triangle := range triangulatePolygon(points) {
+		r.appendSolidTriangleNoShadow(
+			Point{X: triangle[0].X + offset.X, Y: triangle[0].Y + offset.Y},
+			Point{X: triangle[1].X + offset.X, Y: triangle[1].Y + offset.Y},
+			Point{X: triangle[2].X + offset.X, Y: triangle[2].Y + offset.Y},
+			color,
+		)
+	}
+}
+
+func polygonSignedArea(points []Point) (area float32) {
+	var count int = len(points)
+	if count < 3 {
+		return
+	}
+
+	for i := range count {
+		var (
+			a Point = points[i]
+			b Point = points[(i+1)%count]
+		)
+
+		area += (a.X * b.Y) - (b.X * a.Y)
+	}
+
+	area *= 0.5
+	return
+}
+
+func triangleCross(a, b, c Point) (cross float32) {
+	cross = (b.X-a.X)*(c.Y-a.Y) - (b.Y-a.Y)*(c.X-a.X)
+	return
+}
+
+func pointInTriangle(point, a, b, c Point) bool {
+	var (
+		ab  float32 = triangleCross(a, b, point)
+		bc  float32 = triangleCross(b, c, point)
+		ca  float32 = triangleCross(c, a, point)
+		eps float32 = 1e-5
+	)
+
+	return (ab >= -eps && bc >= -eps && ca >= -eps) || (ab <= eps && bc <= eps && ca <= eps)
+}
+
+func triangulatePolygon(points []Point) (triangles [][3]Point) {
+	var count int = len(points)
+	if count > 1 {
+		var (
+			first Point   = points[0]
+			last  Point   = points[count-1]
+			dx    float32 = first.X - last.X
+			dy    float32 = first.Y - last.Y
+		)
+
+		if dx*dx+dy*dy <= 1e-8 {
+			points = points[:count-1]
+			count--
+		}
+	}
+
+	if count < 3 {
+		return
+	}
+
+	if count == 3 {
+		triangles = append(triangles, [3]Point{points[0], points[1], points[2]})
+		return
+	}
+
+	var indices []int = make([]int, 0, count)
+	if polygonSignedArea(points) >= 0 {
+		for i := range count {
+			indices = append(indices, i)
+		}
+	} else {
+		for i := count - 1; i >= 0; i-- {
+			indices = append(indices, i)
+		}
+	}
+
+	for len(indices) > 3 {
+		var earFound bool
+
+		for i := range len(indices) {
+			var (
+				prevIndex int   = indices[(i+len(indices)-1)%len(indices)]
+				currIndex int   = indices[i]
+				nextIndex int   = indices[(i+1)%len(indices)]
+				a         Point = points[prevIndex]
+				b         Point = points[currIndex]
+				c         Point = points[nextIndex]
+				isEar     bool  = true
+			)
+
+			if triangleCross(a, b, c) <= 1e-5 {
+				continue
+			}
+
+			for _, testIndex := range indices {
+				if testIndex == prevIndex || testIndex == currIndex || testIndex == nextIndex {
+					continue
+				}
+
+				if pointInTriangle(points[testIndex], a, b, c) {
+					isEar = false
+					break
+				}
+			}
+
+			if !isEar {
+				continue
+			}
+
+			triangles = append(triangles, [3]Point{a, b, c})
+			indices = append(indices[:i], indices[i+1:]...)
+			earFound = true
+			break
+		}
+
+		if !earFound {
+			triangles = triangles[:0]
+			for i := 1; i+1 < count; i++ {
+				triangles = append(triangles, [3]Point{points[0], points[i], points[i+1]})
+			}
+			return
+		}
+	}
+
+	if len(indices) == 3 {
+		triangles = append(triangles, [3]Point{
+			points[indices[0]],
+			points[indices[1]],
+			points[indices[2]],
+		})
+	}
+
+	return
 }
 
 // appendStrokePath appends a simple stroked polyline/polygon.
@@ -1717,7 +2120,10 @@ func (r *Context) appendStrokePath(points []Point, closed bool, lineWidth float3
 		segmentCount = len(points)
 	}
 
-	segments := make([]strokeSegment, 0, segmentCount)
+	var segments []strokeSegment = r.strokeSegments[:0]
+	if cap(segments) < segmentCount {
+		segments = make([]strokeSegment, 0, segmentCount)
+	}
 	for i := 0; i < segmentCount; i++ {
 		a := points[i]
 		b := points[(i+1)%len(points)]
@@ -1743,6 +2149,7 @@ func (r *Context) appendStrokePath(points []Point, closed bool, lineWidth float3
 	if len(segments) == 0 {
 		return
 	}
+	r.strokeSegments = segments
 
 	for i, seg := range segments {
 		startExtend := float32(0)
@@ -1921,12 +2328,10 @@ func (r *Context) appendTransformedSDFRect(x, y, width, height, radius, strokeWi
 		height = -height
 	}
 
-	scaleX = float32(math.Hypot(float64(r.transform.A), float64(r.transform.B)))
-	scaleY = float32(math.Hypot(float64(r.transform.C), float64(r.transform.D)))
-	if scaleX == 0 || scaleY == 0 {
+	scaleX, scaleY, scale = r.transformStrokeScale()
+	if scale == 0 {
 		return
 	}
-	scale = min(scaleX, scaleY)
 	center = r.transform.Apply(x+width/2, y+height/2)
 	r.appendOrientedSDFQuad(
 		center,
@@ -1940,6 +2345,29 @@ func (r *Context) appendTransformedSDFRect(x, y, width, height, radius, strokeWi
 		strokeWidth*scale,
 		color,
 	)
+}
+
+func (r *Context) effectiveStrokeWidth() float32 {
+	if r == nil {
+		return 0
+	}
+
+	_, _, scale := r.transformStrokeScale()
+	return r.lineWidth * scale
+}
+
+func (r *Context) transformStrokeScale() (scaleX, scaleY, scale float32) {
+	if r == nil {
+		return
+	}
+
+	scaleX = float32(math.Hypot(float64(r.transform.A), float64(r.transform.B)))
+	scaleY = float32(math.Hypot(float64(r.transform.C), float64(r.transform.D)))
+	if scaleX == 0 || scaleY == 0 {
+		return scaleX, scaleY, 0
+	}
+
+	return scaleX, scaleY, min(scaleX, scaleY)
 }
 
 func (r *Context) appendOrientedSDFQuad(center Point, tx, ty, nx, ny, halfWidth, halfHeight, radius, strokeWidth float32, color Color) {
@@ -2214,16 +2642,60 @@ func (r *Context) activeTextureGroup() *wgpu.BindGroup {
 	return nil
 }
 
+func (r *Context) resolvedImageSmoothingMode() ImageSmoothingMode {
+	if r == nil {
+		return ImageSmoothingModeLinear
+	}
+
+	switch r.imageSmoothingMode {
+	case ImageSmoothingModeNearest:
+		return ImageSmoothingModeNearest
+	case ImageSmoothingModeLinear, ImageSmoothingModeDefault:
+		return ImageSmoothingModeLinear
+	default:
+		return ImageSmoothingModeLinear
+	}
+}
+
+func (r *Context) resolvedImageSampler(img *gimage.Image) *wgpu.Sampler {
+	switch r.resolvedImageSmoothingMode() {
+	case ImageSmoothingModeNearest:
+		if r.imageSamplerNearest != nil {
+			return r.imageSamplerNearest
+		}
+	case ImageSmoothingModeLinear:
+		if r.imageSamplerLinear != nil {
+			return r.imageSamplerLinear
+		}
+	}
+
+	if img != nil {
+		return img.Sampler
+	}
+
+	return nil
+}
+
 func (r *Context) imageGroup(img *gimage.Image) (*wgpu.BindGroup, error) {
-	if group, ok := r.imageGroups[img]; ok {
+	var key imageGroupKey = imageGroupKey{
+		image:         img,
+		smoothingMode: r.resolvedImageSmoothingMode(),
+	}
+
+	if group, ok := r.imageGroups[key]; ok {
 		return group, nil
+	}
+
+	var sampler *wgpu.Sampler = r.resolvedImageSampler(img)
+	if sampler == nil {
+		return nil, fmt.Errorf("image sampler is not initialized")
 	}
 
 	group, err := r.device.CreateBindGroup(&wgpu.BindGroupDescriptor{
 		Label:  "gctx2d Image Bind Group",
 		Layout: r.textureLayout,
 		Entries: []wgpu.BindGroupEntry{
-			{Binding: 0, Sampler: img.Sampler},
+			{Binding: 0, Sampler: sampler},
 			{Binding: 1, TextureView: img.View},
 		},
 	})
@@ -2231,7 +2703,7 @@ func (r *Context) imageGroup(img *gimage.Image) (*wgpu.BindGroup, error) {
 		return nil, fmt.Errorf("create image bind group: %w", err)
 	}
 
-	r.imageGroups[img] = group
+	r.imageGroups[key] = group
 	return group, nil
 }
 
@@ -2252,16 +2724,16 @@ func (r *Context) appendBatch(pipeline *wgpu.RenderPipeline, group, uniform *wgp
 }
 
 func (r *Context) ensureStencilAttachment() (err error) {
-	if r.stencilTexture != nil && r.stencilView != nil && r.stencilWidth == r.width && r.stencilHeight == r.height {
+	if r.stencilTexture != nil && r.stencilView != nil && r.stencilWidth == r.targetWidth && r.stencilHeight == r.targetHeight {
 		return nil
 	}
 	r.releaseStencilAttachment()
-	if r.width <= 0 || r.height <= 0 {
-		return fmt.Errorf("invalid clipping attachment size %dx%d", r.width, r.height)
+	if r.targetWidth <= 0 || r.targetHeight <= 0 {
+		return fmt.Errorf("invalid clipping attachment size %dx%d", r.targetWidth, r.targetHeight)
 	}
 	if r.stencilTexture, err = r.device.CreateTexture(&wgpu.TextureDescriptor{
 		Label:         "gctx2d Clip Stencil",
-		Size:          wgpu.Extent3D{Width: uint32(r.width), Height: uint32(r.height), DepthOrArrayLayers: 1},
+		Size:          wgpu.Extent3D{Width: uint32(r.targetWidth), Height: uint32(r.targetHeight), DepthOrArrayLayers: 1},
 		MipLevelCount: 1,
 		SampleCount:   1,
 		Dimension:     gputypes.TextureDimension2D,
@@ -2274,7 +2746,7 @@ func (r *Context) ensureStencilAttachment() (err error) {
 		r.releaseStencilAttachment()
 		return fmt.Errorf("create clip stencil view: %w", err)
 	}
-	r.stencilWidth, r.stencilHeight = r.width, r.height
+	r.stencilWidth, r.stencilHeight = r.targetWidth, r.targetHeight
 	return nil
 }
 
@@ -2292,43 +2764,46 @@ func (r *Context) releaseStencilAttachment() {
 
 // flattenPath converts the current canvas-style path into closed/open subpaths.
 func (r *Context) flattenPath() (subpaths []pathSubpath) {
-	var current []Point
+	if !r.pathDirty {
+		return r.flattenedPath
+	}
 
-	finish := func(closed bool) {
-		if len(current) == 0 {
+	if cap(r.flattenedPoints) < len(r.path) {
+		r.flattenedPoints = make([]Point, 0, len(r.path))
+	} else {
+		r.flattenedPoints = r.flattenedPoints[:0]
+	}
+	r.flattenedPath = r.flattenedPath[:0]
+
+	var start int
+	var finish func(bool)
+	finish = func(closed bool) {
+		if start == len(r.flattenedPoints) {
 			return
 		}
 
-		points := make([]Point, len(current))
-		copy(points, current)
-
-		subpaths = append(subpaths, pathSubpath{
-			points: points,
+		r.flattenedPath = append(r.flattenedPath, pathSubpath{
+			points: r.flattenedPoints[start:],
 			closed: closed,
 		})
-
-		current = current[:0]
+		start = len(r.flattenedPoints)
 	}
 
 	for _, cmd := range r.path {
 		switch cmd.kind {
 		case pathCommandMoveTo:
 			finish(false)
-			current = append(current, cmd.p)
+			r.flattenedPoints = append(r.flattenedPoints, cmd.p)
 		case pathCommandLineTo:
-			if len(current) == 0 {
-				current = append(current, cmd.p)
-				continue
-			}
-
-			current = append(current, cmd.p)
+			r.flattenedPoints = append(r.flattenedPoints, cmd.p)
 		case pathCommandClose:
 			finish(true)
 		}
 	}
 
 	finish(false)
-	return
+	r.pathDirty = false
+	return r.flattenedPath
 }
 
 // lastPathCommandKind returns the most recent path command kind.
@@ -2435,7 +2910,10 @@ func (r *Context) ellipsePoints(cx, cy, radiusX, radiusY, rotation, startAngle, 
 		sinRot float32 = float32(math.Sin(float64(rotation)))
 	)
 
-	points = make([]Point, 0, steps+1)
+	points = r.curvePoints[:0]
+	if cap(points) < steps+1 {
+		points = make([]Point, 0, steps+1)
+	}
 	for i := 0; i <= steps; i++ {
 		var (
 			t     float32 = float32(i) / float32(steps)
@@ -2450,13 +2928,17 @@ func (r *Context) ellipsePoints(cx, cy, radiusX, radiusY, rotation, startAngle, 
 		})
 	}
 
+	r.curvePoints = points
 	return
 }
 
 // quadraticCurvePoints returns a polyline approximation for a quadratic Bezier curve.
 func (r *Context) quadraticCurvePoints(p0, p1, p2 Point) (points []Point) {
 	steps := curveSubdivisionSteps([]Point{p0, p1, p2})
-	points = make([]Point, 0, steps+1)
+	points = r.curvePoints[:0]
+	if cap(points) < steps+1 {
+		points = make([]Point, 0, steps+1)
+	}
 
 	for i := 0; i <= steps; i++ {
 		t := float32(i) / float32(steps)
@@ -2467,13 +2949,17 @@ func (r *Context) quadraticCurvePoints(p0, p1, p2 Point) (points []Point) {
 		})
 	}
 
+	r.curvePoints = points
 	return
 }
 
 // cubicCurvePoints returns a polyline approximation for a cubic Bezier curve.
 func (r *Context) cubicCurvePoints(p0, p1, p2, p3 Point) (points []Point) {
 	steps := curveSubdivisionSteps([]Point{p0, p1, p2, p3})
-	points = make([]Point, 0, steps+1)
+	points = r.curvePoints[:0]
+	if cap(points) < steps+1 {
+		points = make([]Point, 0, steps+1)
+	}
 
 	for i := 0; i <= steps; i++ {
 		t := float32(i) / float32(steps)
@@ -2484,6 +2970,7 @@ func (r *Context) cubicCurvePoints(p0, p1, p2, p3 Point) (points []Point) {
 		})
 	}
 
+	r.curvePoints = points
 	return
 }
 

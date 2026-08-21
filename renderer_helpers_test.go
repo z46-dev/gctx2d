@@ -73,9 +73,27 @@ func TestStateSettersAndBeginReset(t *testing.T) {
 		t.Fatalf("expected invalid text baseline to clamp to alphabetic, got %v", ctx.textBaseline)
 	}
 
+	ctx.SetImageSmoothingMode(ImageSmoothingMode(99))
+	if ctx.imageSmoothingMode != ImageSmoothingModeDefault {
+		t.Fatalf("expected invalid image smoothing mode to clamp to default, got %v", ctx.imageSmoothingMode)
+	}
+
+	ctx.SetEdgeAAMode(EdgeAAMode(99))
+	if ctx.edgeAAMode != EdgeAAModeDefault {
+		t.Fatalf("expected invalid edge aa mode to clamp to default, got %v", ctx.edgeAAMode)
+	}
+
 	ctx.Begin(320, 240)
 	if ctx.width != 320 || ctx.height != 240 {
 		t.Fatalf("unexpected frame size: %dx%d", ctx.width, ctx.height)
+	}
+	if ctx.targetWidth != 320 || ctx.targetHeight != 240 {
+		t.Fatalf("unexpected target size: %dx%d", ctx.targetWidth, ctx.targetHeight)
+	}
+
+	ctx.BeginTarget(320, 240, 480, 360)
+	if ctx.targetWidth != 480 || ctx.targetHeight != 360 {
+		t.Fatalf("unexpected scaled target size: %dx%d", ctx.targetWidth, ctx.targetHeight)
 	}
 	if len(ctx.vertices) != 0 || len(ctx.batches) != 0 || len(ctx.path) != 0 || len(ctx.stateStack) != 0 {
 		t.Fatal("Begin should reset frame-local slices")
@@ -86,6 +104,9 @@ func TestStateSettersAndBeginReset(t *testing.T) {
 	if ctx.imageEffect != ImageEffectNone || ctx.currentImageShader != nil || ctx.effectTime != 0 {
 		t.Fatal("Begin should reset effect state")
 	}
+	if ctx.imageSmoothingMode != ImageSmoothingModeDefault || ctx.edgeAAMode != EdgeAAModeDefault {
+		t.Fatal("Begin should reset antialiasing state")
+	}
 	if ctx.usesStencil {
 		t.Fatal("Begin should leave frames without clips on the non-stencil render path")
 	}
@@ -93,21 +114,23 @@ func TestStateSettersAndBeginReset(t *testing.T) {
 
 func TestDrawingStateSaveRestore(t *testing.T) {
 	ctx := &Context{
-		fillStyle:    ColorRed,
-		strokeStyle:  ColorBlue,
-		lineWidth:    3,
-		lineCap:      LineCapSquare,
-		lineJoin:     LineJoinRound,
-		miterLimit:   7,
-		globalAlpha:  0.4,
-		shadowColor:  Color{R: 0.1, G: 0.2, B: 0.3, A: 0.5},
-		shadowBlur:   6,
-		textAlign:    TextAlignCenter,
-		textBaseline: TextBaselineMiddle,
-		transform:    Matrix{A: 1, D: 1, E: 10, F: 20},
-		imageEffect:  ImageEffectElectric,
-		effectTime:   9,
-		stateStack:   make([]drawingState, 0, 1),
+		fillStyle:          ColorRed,
+		strokeStyle:        ColorBlue,
+		lineWidth:          3,
+		lineCap:            LineCapSquare,
+		lineJoin:           LineJoinRound,
+		miterLimit:         7,
+		globalAlpha:        0.4,
+		shadowColor:        Color{R: 0.1, G: 0.2, B: 0.3, A: 0.5},
+		shadowBlur:         6,
+		textAlign:          TextAlignCenter,
+		textBaseline:       TextBaselineMiddle,
+		transform:          Matrix{A: 1, D: 1, E: 10, F: 20},
+		imageEffect:        ImageEffectElectric,
+		imageSmoothingMode: ImageSmoothingModeNearest,
+		edgeAAMode:         EdgeAAModeOff,
+		effectTime:         9,
+		stateStack:         make([]drawingState, 0, 1),
 	}
 
 	ctx.Save()
@@ -124,6 +147,8 @@ func TestDrawingStateSaveRestore(t *testing.T) {
 	ctx.SetTextBaseline(TextBaselineTop)
 	ctx.SetTransform(2, 0, 0, 2, 0, 0)
 	ctx.SetImageEffect(ImageEffectNone)
+	ctx.SetImageSmoothingMode(ImageSmoothingModeLinear)
+	ctx.SetEdgeAAMode(EdgeAAModeOn)
 	ctx.SetEffectTime(0)
 	ctx.Restore()
 
@@ -141,6 +166,9 @@ func TestDrawingStateSaveRestore(t *testing.T) {
 	}
 	if ctx.transform != (Matrix{A: 1, D: 1, E: 10, F: 20}) || ctx.imageEffect != ImageEffectElectric || ctx.effectTime != 9 {
 		t.Fatal("transform/effect state did not restore")
+	}
+	if ctx.imageSmoothingMode != ImageSmoothingModeNearest || ctx.edgeAAMode != EdgeAAModeOff {
+		t.Fatal("antialiasing state did not restore")
 	}
 
 	ctx.Restore()

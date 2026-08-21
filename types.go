@@ -7,13 +7,15 @@ import (
 )
 
 type (
-	ImageEffect  int
-	FontWeight   int
-	TextAlign    int
-	TextBaseline int
-	LineCap      int
-	LineJoin     int
-	ClipMode     int
+	ImageEffect        int
+	ImageSmoothingMode int
+	EdgeAAMode         int
+	FontWeight         int
+	TextAlign          int
+	TextBaseline       int
+	LineCap            int
+	LineJoin           int
+	ClipMode           int
 
 	Color struct {
 		R float32
@@ -56,10 +58,17 @@ type (
 		disableTextKerning bool
 		transform          Matrix
 		imageEffect        ImageEffect
+		imageSmoothingMode ImageSmoothingMode
+		edgeAAMode         EdgeAAMode
 		effectTime         float32
 		currentImageShader ImageShaderBinding
 		currentFont        *fontFace
 		clips              []*clipEntry
+	}
+
+	imageGroupKey struct {
+		image         *gimage.Image
+		smoothingMode ImageSmoothingMode
 	}
 
 	vertex struct {
@@ -208,40 +217,56 @@ type (
 		clipDecrementPipeline *wgpu.RenderPipeline
 		pipelineLayout        *wgpu.PipelineLayout
 		textureLayout         *wgpu.BindGroupLayout
-		imageGroups           map[*gimage.Image]*wgpu.BindGroup
+		imageGroups           map[imageGroupKey]*wgpu.BindGroup
 
-		fontSampler *wgpu.Sampler
-		defaultFont *FontHandle
-		currentFont *fontFace
-		fontFaces   map[fontFaceKey]*fontFace
+		fontSampler         *wgpu.Sampler
+		imageSamplerNearest *wgpu.Sampler
+		imageSamplerLinear  *wgpu.Sampler
+		defaultFont         *FontHandle
+		currentFont         *fontFace
+		fontFaces           map[fontFaceKey]*fontFace
 
 		vertexBuffer   *wgpu.Buffer
 		vertexCapacity int
 		vertices       []vertex
 		batches        []batch
 
-		width  int
-		height int
+		width        int
+		height       int
+		targetWidth  int
+		targetHeight int
 
-		fillStyle          Color
-		strokeStyle        Color
-		lineWidth          float32
-		lineCap            LineCap
-		lineJoin           LineJoin
-		miterLimit         float32
-		globalAlpha        float32
-		shadowColor        Color
-		shadowBlur         float32
-		textAlign          TextAlign
-		textBaseline       TextBaseline
-		disableTextKerning bool
-		transform          Matrix
-		imageEffect        ImageEffect
-		effectTime         float32
-		currentImageShader ImageShaderBinding
-		stateStack         []drawingState
-		path               []pathCommand
-		clips              []*clipEntry
+		fillStyle           Color
+		strokeStyle         Color
+		lineWidth           float32
+		lineCap             LineCap
+		lineJoin            LineJoin
+		miterLimit          float32
+		globalAlpha         float32
+		shadowColor         Color
+		shadowBlur          float32
+		textAlign           TextAlign
+		textBaseline        TextBaseline
+		disableTextKerning  bool
+		transform           Matrix
+		imageEffect         ImageEffect
+		imageSmoothingMode  ImageSmoothingMode
+		edgeAAMode          EdgeAAMode
+		effectTime          float32
+		currentImageShader  ImageShaderBinding
+		stateStack          []drawingState
+		path                []pathCommand
+		flattenedPath       []pathSubpath
+		flattenedPoints     []Point
+		pathDirty           bool
+		curvePoints         []Point
+		strokeSegments      []strokeSegment
+		pathCircle          bool
+		pathCircleX         float32
+		pathCircleY         float32
+		pathCircleRadius    float32
+		pathCircleTransform Matrix
+		clips               []*clipEntry
 
 		stencilTexture *wgpu.Texture
 		stencilView    *wgpu.TextureView

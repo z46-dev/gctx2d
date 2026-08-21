@@ -116,7 +116,7 @@ fn inside_quad(local: vec2<f32>, half_size: vec2<f32>) -> f32 {
 
 fn sample_quad_alpha(input: VertexOut, uv: vec2<f32>) -> f32 {
     let clamped_uv = clamp(uv, input.uv_min, input.uv_max);
-    let sample = textureSample(ui_atlas, ui_sampler, clamped_uv);
+    let sample = textureSampleLevel(ui_atlas, ui_sampler, clamped_uv, 0.0);
     return sample.a;
 }
 
@@ -151,9 +151,12 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
     // kind < 0.5: solid/SDF rectangle geometry.
     // 0.5 <= kind < 1.5: text glyph alpha mask.
     // kind >= 1.5: full-color image quad.
+    let rounded_rect_distance = rounded_rect_sdf(input.local, input.half_size, input.radius);
+    let rounded_rect_aa = max(length(vec2<f32>(dpdx(rounded_rect_distance), dpdy(rounded_rect_distance))), 0.5);
+
     if (input.kind < 0.5) {
-        let d = rounded_rect_sdf(input.local, input.half_size, input.radius);
-        let aa = max(length(vec2<f32>(dpdx(d), dpdy(d))), 0.5);
+        let d = rounded_rect_distance;
+        let aa = rounded_rect_aa;
 
         var coverage: f32;
         var shadow_distance: f32;
@@ -179,7 +182,7 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
 
     let inside = inside_quad(input.local, input.half_size);
     let uv = quad_uv(input.local, input.half_size, input.uv_min, input.uv_max);
-    let sample = textureSample(ui_atlas, ui_sampler, clamp(uv, input.uv_min, input.uv_max));
+    let sample = textureSampleLevel(ui_atlas, ui_sampler, clamp(uv, input.uv_min, input.uv_max), 0.0);
     var shadow = vec4<f32>(0.0, 0.0, 0.0, 0.0);
     if (input.shadow_blur > 0.0 && input.shadow_color.a > 0.0) {
         let blurred_alpha = sample_shadow_alpha(input);
