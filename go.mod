@@ -4,7 +4,7 @@ go 1.26.2
 
 require (
 	github.com/flopp/go-findfont v0.1.0
-	github.com/gogpu/gputypes v0.5.0
+	github.com/gogpu/gputypes v0.5.2
 	github.com/gogpu/wgpu v0.29.1
 	golang.org/x/image v0.41.0
 )
