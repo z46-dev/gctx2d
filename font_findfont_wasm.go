@@ -11,3 +11,7 @@ func LoadFontByName(name string) (handle *FontHandle, err error) {
 	handle, err = loadDefaultFont()
 	return
 }
+
+func isRegularFontVariant(normalizedName string) bool {
+	return normalizedName == "embedded:fallback"
+}

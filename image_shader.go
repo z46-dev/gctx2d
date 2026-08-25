@@ -248,6 +248,7 @@ func (s *ImageShader[T]) SetUniforms(uniforms T) (err error) {
 	}
 
 	s.uniforms = uniforms
+	// #nosec G103 -- uniformByteSize was validated against the size of T when the program was created.
 	var data []byte = unsafe.Slice((*byte)(unsafe.Pointer(&s.uniforms)), int(s.program.uniformByteSize))
 	if err = s.program.device.Queue().WriteBuffer(s.uniformBuffer, 0, data); err != nil {
 		err = fmt.Errorf("upload image shader uniforms: %w", err)

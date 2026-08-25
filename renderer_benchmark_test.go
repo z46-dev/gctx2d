@@ -19,8 +19,8 @@ func BenchmarkDynamicEntities(b *testing.B) {
 	}
 
 	b.ReportAllocs()
-	b.ResetTimer()
-	for range b.N {
+
+	for b.Loop() {
 		ctx.vertices = ctx.vertices[:0]
 		ctx.batches = ctx.batches[:0]
 		for entity := range 1000 {

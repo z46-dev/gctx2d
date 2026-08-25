@@ -1,3 +1,6 @@
+![Tests](https://img.shields.io/github/actions/workflow/status/z46-dev/gctx2d/ci.yml?branch=main&event=push&label=CI)
+![Made with Golang](https://img.shields.io/badge/-Made_with_Golang-007d9c?logo=go&logoColor=white)
+
 # gctx2d
 
 Canvas-style bindings for https://github.com/gogpu/gogpu wgpu pipeline

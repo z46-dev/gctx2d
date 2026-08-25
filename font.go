@@ -101,6 +101,7 @@ func LoadFont(filePath string) (handle *FontHandle, err error) {
 	}
 
 	var fontBytes []byte
+	// #nosec G304 -- LoadFont intentionally accepts a caller-selected font path.
 	if fontBytes, err = os.ReadFile(filePath); err != nil {
 		err = fmt.Errorf("read font %q: %w", filePath, err)
 		return

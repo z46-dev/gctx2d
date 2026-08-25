@@ -47,6 +47,7 @@ func LoadImage(device *wgpu.Device, filePath string) (img *Image, err error) {
 	}
 
 	var file *os.File
+	// #nosec G304 -- LoadImage intentionally accepts a caller-selected image path.
 	if file, err = os.Open(filePath); err != nil {
 		err = fmt.Errorf("open image %q: %w", filePath, err)
 		return

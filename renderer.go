@@ -1649,7 +1649,8 @@ func (r *Context) Flush(target *wgpu.TextureView, clearColor *gputypes.Color) (e
 		}
 
 		var (
-			size  int    = int(vertexStride) * len(r.vertices)
+			size int = int(vertexStride) * len(r.vertices)
+			// #nosec G103 -- vertices is non-empty here and size covers its contiguous backing storage.
 			bytes []byte = unsafe.Slice((*byte)(unsafe.Pointer(&r.vertices[0])), size)
 		)
 
