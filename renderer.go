@@ -516,7 +516,7 @@ func (r *Context) createPipeline(targetFormat gputypes.TextureFormat) (err error
 		return
 	}
 
-	drawStencil := stencilState(wgpu.StencilOperationKeep)
+	drawStencil := stencilState(gputypes.StencilOperationKeep)
 	pipelineDesc.Label = "Conquest UI Stencil Pipeline"
 	pipelineDesc.DepthStencil = &drawStencil
 	if r.stencilPipeline, err = r.device.CreateRenderPipeline(pipelineDesc); err != nil {
@@ -531,21 +531,21 @@ func (r *Context) createPipeline(targetFormat gputypes.TextureFormat) (err error
 	}
 	defer clipShader.Release()
 
-	if r.clipIncrementPipeline, err = r.createClipPipeline(clipShader, "gctx2d Clip Increment Pipeline", wgpu.StencilOperationIncrementClamp); err != nil {
+	if r.clipIncrementPipeline, err = r.createClipPipeline(clipShader, "gctx2d Clip Increment Pipeline", gputypes.StencilOperationIncrementClamp); err != nil {
 		return
 	}
-	if r.clipDecrementPipeline, err = r.createClipPipeline(clipShader, "gctx2d Clip Decrement Pipeline", wgpu.StencilOperationDecrementClamp); err != nil {
+	if r.clipDecrementPipeline, err = r.createClipPipeline(clipShader, "gctx2d Clip Decrement Pipeline", gputypes.StencilOperationDecrementClamp); err != nil {
 		return
 	}
 
 	return
 }
 
-func stencilState(passOperation wgpu.StencilOperation) wgpu.DepthStencilState {
+func stencilState(passOperation gputypes.StencilOperation) wgpu.DepthStencilState {
 	face := wgpu.StencilFaceState{
 		Compare:     gputypes.CompareFunctionEqual,
-		FailOp:      wgpu.StencilOperationKeep,
-		DepthFailOp: wgpu.StencilOperationKeep,
+		FailOp:      gputypes.StencilOperationKeep,
+		DepthFailOp: gputypes.StencilOperationKeep,
 		PassOp:      passOperation,
 	}
 	return wgpu.DepthStencilState{
@@ -558,7 +558,7 @@ func stencilState(passOperation wgpu.StencilOperation) wgpu.DepthStencilState {
 	}
 }
 
-func (r *Context) createClipPipeline(shader *wgpu.ShaderModule, label string, operation wgpu.StencilOperation) (*wgpu.RenderPipeline, error) {
+func (r *Context) createClipPipeline(shader *wgpu.ShaderModule, label string, operation gputypes.StencilOperation) (*wgpu.RenderPipeline, error) {
 	state := stencilState(operation)
 	pipeline, err := r.device.CreateRenderPipeline(&wgpu.RenderPipelineDescriptor{
 		Label:  label,
@@ -1758,7 +1758,11 @@ func (r *Context) Flush(target *wgpu.TextureView, clearColor *gputypes.Color) (e
 				currentUniform = batch.uniform
 			}
 
-			pass.Draw(batch.count, 1, batch.start, 0)
+			pass.Draw(gputypes.DrawArgs{
+				VertexCount:   batch.count,
+				InstanceCount: 1,
+				FirstVertex:   batch.start,
+			})
 		}
 	}
 
