@@ -1,6 +1,6 @@
 module github.com/z46-dev/gctx2d
 
-go 1.26.2
+go 1.26.7
 
 require (
 	github.com/flopp/go-findfont v0.1.0
